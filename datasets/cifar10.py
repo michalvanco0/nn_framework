@@ -1,9 +1,7 @@
-"""CIFAR-10 dataset loading utilities."""
-
 from __future__ import annotations
 
 from pathlib import Path
-from typing import tuple
+from typing import Tuple
 
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms

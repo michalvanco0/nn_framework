@@ -1,34 +1,48 @@
-"""Model evaluation helpers."""
-
-from __future__ import annotations
+from typing import Dict
 
 import torch
-from torch import nn
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 
-class Evaluator:
-    """Evaluate classification models on dataloaders."""
+def evaluate(
+    model: torch.nn.Module,
+    dataloader,
+    device: torch.device,
+) -> Dict[str, list]:
+    """
+    Evaluate a classification model and return predictions,
+    logits, probabilities and confidence scores.
+    """
 
-    def evaluate(
-        self,
-        model: nn.Module,
-        dataloader: DataLoader,
-        device: torch.device,
-    ) -> tuple[list[int], list[int]]:
-        """Run model inference and return true/predicted labels."""
-        model.eval()
-        y_true: list[int] = []
-        y_pred: list[int] = []
+    model.eval()
 
-        with torch.no_grad():
-            for inputs, targets in dataloader:
-                inputs = inputs.to(device)
-                targets = targets.to(device)
-                outputs = model(inputs)
-                predictions = torch.argmax(outputs, dim=1)
+    y_true = []
+    y_pred = []
+    logits = []
+    probabilities = []
+    confidence = []
 
-                y_true.extend(targets.cpu().tolist())
-                y_pred.extend(predictions.cpu().tolist())
+    with torch.no_grad():
+        for inputs, targets in dataloader:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
 
-        return y_true, y_pred
+            outputs = model(inputs)
+
+            probs = F.softmax(outputs, dim=1)
+            preds = torch.argmax(probs, dim=1)
+            conf = torch.max(probs, dim=1).values
+
+            y_true.extend(targets.cpu().tolist())
+            y_pred.extend(preds.cpu().tolist())
+            logits.extend(outputs.cpu().tolist())
+            probabilities.extend(probs.cpu().tolist())
+            confidence.extend(conf.cpu().tolist())
+
+    return {
+        "y_true": y_true,
+        "y_pred": y_pred,
+        "logits": logits,
+        "probabilities": probabilities,
+        "confidence": confidence,
+    }
