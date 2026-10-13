@@ -25,7 +25,7 @@ class BaselineConfig:
 
     epochs: int = 1
     batch_size: int = 128
-    learning_rate: float = 1e-3
+    learning_rate: float = 0.1
     num_workers: int = 2
     seed: int = 42
     data_dir: Path = Path("data")
@@ -138,10 +138,6 @@ def run_baseline(config: BaselineConfig) -> dict[str, float | str | list[list[in
         "f1": metrics["f1"],
         "confusion_matrix": metrics["confusion_matrix"],
     }
-
-    config.results_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = config.results_dir / "resnet18_cifar10.pt"
-    torch.save(model.state_dict(), checkpoint_path)
 
     metrics_path = config.results_dir / "baseline_metrics.json"
     with metrics_path.open("w", encoding="utf-8") as file:
