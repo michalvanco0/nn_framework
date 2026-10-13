@@ -1,5 +1,3 @@
-"""Baseline training and evaluation experiment."""
-
 from __future__ import annotations
 
 import json
@@ -13,17 +11,15 @@ import torch
 from torch import nn, optim
 from tqdm import tqdm
 
-from datasets.cifar10 import get_cifar10_dataloaders
-from evaluation.evaluator import Evaluator
+from datasets.cifar10 import get_cifar10_train_val_test_dataloaders
+from evaluation.evaluator import evaluate as evaluate_predictions
 from evaluation.performance import calculate_classification_metrics
 from models.resnet import create_resnet18
 
 
 @dataclass
 class BaselineConfig:
-    """Configurable hyperparameters for the baseline experiment."""
-
-    epochs: int = 1
+    epochs: int = 200
     batch_size: int = 128
     learning_rate: float = 0.1
     num_workers: int = 2
@@ -33,11 +29,11 @@ class BaselineConfig:
 
 
 def set_seed(seed: int) -> None:
-    """Set random seeds for reproducible runs."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def train_one_epoch(
@@ -47,7 +43,6 @@ def train_one_epoch(
     optimizer: optim.Optimizer,
     device: torch.device,
 ) -> float:
-    """Train for one epoch and return average loss."""
     model.train()
     running_loss = 0.0
 
@@ -55,7 +50,7 @@ def train_one_epoch(
         inputs = inputs.to(device)
         targets = targets.to(device)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         outputs = model(inputs)
         loss = criterion(outputs, targets)
         loss.backward()
@@ -71,7 +66,6 @@ def save_confusion_matrix_plot(
     class_names: tuple[str, ...],
     output_path: Path,
 ) -> None:
-    """Save a confusion matrix image for baseline diagnostics."""
     cm = np.array(confusion_matrix)
     fig, ax = plt.subplots(figsize=(8, 8))
     image = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
@@ -106,32 +100,90 @@ def save_confusion_matrix_plot(
     plt.close(fig)
 
 
-def run_baseline(config: BaselineConfig) -> dict[str, float | str | list[list[int]]]:
-    """Run baseline train/evaluate pipeline and persist outputs."""
+def run_baseline(
+    config: BaselineConfig,
+) -> dict[str, float | int | str | list[list[int]]]:
+    if config.epochs < 1:
+        raise ValueError("epochs must be at least 1")
+
     set_seed(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-    train_loader, test_loader, class_names = get_cifar10_dataloaders(
-        data_dir=config.data_dir,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
+    train_loader, val_loader, test_loader, class_names = (
+        get_cifar10_train_val_test_dataloaders(
+            data_dir=config.data_dir,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            seed=config.seed,
+        )
     )
 
-    model = create_resnet18(num_classes=10).to(device)
+    model = create_resnet18(num_classes=len(class_names)).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=config.learning_rate,
+        momentum=0.9,
+        weight_decay=5e-4,
+        nesterov=True,
+    )
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config.epochs,
+    )
+
+    config.results_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = config.results_dir / "resnet18_cifar10.pt"
+    best_val_accuracy = -1.0
+    best_epoch = 0
 
     for epoch in range(config.epochs):
-        avg_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        print(f"Epoch {epoch + 1}/{config.epochs} - loss: {avg_loss:.4f}")
+        avg_loss = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+        )
+        val_predictions = evaluate_predictions(model, val_loader, device)
+        val_targets = val_predictions["y_true"]
+        val_predictions_list = val_predictions["y_pred"]
+        val_accuracy = sum(
+            target == prediction
+            for target, prediction in zip(val_targets, val_predictions_list)
+        ) / len(val_targets)
 
-    evaluator = Evaluator()
-    y_true, y_pred = evaluator.evaluate(model, test_loader, device)
-    metrics = calculate_classification_metrics(y_true, y_pred)
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), checkpoint_path)
+
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(
+            f"Epoch {epoch + 1}/{config.epochs} "
+            f"- loss: {avg_loss:.4f} "
+            f"- val_accuracy: {val_accuracy:.4f} "
+            f"- best_val_accuracy: {best_val_accuracy:.4f} "
+            f"- lr: {current_lr:.6f}"
+        )
+        scheduler.step()
+
+    if best_epoch == 0:
+        raise RuntimeError("Training ended without producing a model checkpoint")
+
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    test_predictions = evaluate_predictions(model, test_loader, device)
+    metrics = calculate_classification_metrics(
+        test_predictions["y_true"],
+        test_predictions["y_pred"],
+    )
 
     result = {
         "model": "ResNet18",
         "dataset": "CIFAR10",
+        "best_epoch": best_epoch,
+        "best_validation_accuracy": best_val_accuracy,
         "accuracy": metrics["accuracy"],
         "precision": metrics["precision"],
         "recall": metrics["recall"],
@@ -149,4 +201,9 @@ def run_baseline(config: BaselineConfig) -> dict[str, float | str | list[list[in
         output_path=config.results_dir / "confusion_matrix.png",
     )
 
+    print(
+        f"Best validation accuracy: {best_val_accuracy:.4f} "
+        f"(epoch {best_epoch})"
+    )
+    print(f"Test accuracy: {metrics['accuracy']:.4f}")
     return result
