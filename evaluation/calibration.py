@@ -4,119 +4,108 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def calculate_ece(
+def calculate_ace(
     y_true,
-    y_pred,
-    confidence,
+    probabilities,
     num_bins: int = 10,
 ):
-    """
-    Calculate Expected Calibration Error (ECE).
-
-    Predictions are divided into confidence bins.
-    ECE measures the weighted difference between
-    accuracy and confidence in each bin.
-    """
-
     y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    confidence = np.asarray(confidence)
+    probabilities = np.asarray(probabilities, dtype=float)
 
-    bin_edges = np.linspace(0.0, 1.0, num_bins + 1)
+    if y_true.ndim != 1:
+        raise ValueError("y_true must be a one-dimensional array")
+    if probabilities.ndim != 2:
+        raise ValueError("probabilities must have shape (n_samples, n_classes)")
+    if probabilities.shape[0] != len(y_true):
+        raise ValueError("y_true and probabilities must contain the same samples")
+    if probabilities.shape[1] < 2:
+        raise ValueError("ACE requires at least two classes")
+    if num_bins < 1 or num_bins > len(y_true):
+        raise ValueError("num_bins must be between 1 and the number of samples")
 
-    ece = 0.0
-    bins = []
+    num_classes = probabilities.shape[1]
+    classwise_bins = []
+    class_errors = []
 
-    for i in range(num_bins):
-        lower = bin_edges[i]
-        upper = bin_edges[i + 1]
+    # K - class_index 
+    # R - num_bins
+    # acc(r,k) - bin_accuracy
+    # conf(r,k) - bin_confidence
+    for class_index in range(num_classes):
+        class_probabilities = probabilities[:, class_index]
+        sorted_indices = np.argsort(class_probabilities, kind="stable")
+        adaptive_bins = np.array_split(sorted_indices, num_bins)
+        bin_details = []
+        bin_errors = []
 
-        if i == num_bins - 1:
-            mask = (confidence >= lower) & (confidence <= upper)
-        else:
-            mask = (confidence >= lower) & (confidence < upper)
+        for indices in adaptive_bins:
+            bin_probabilities = class_probabilities[indices]
+            bin_accuracy = float(np.mean(y_true[indices] == class_index))
+            bin_confidence = float(np.mean(bin_probabilities))
+            bin_error = abs(bin_accuracy - bin_confidence)
 
-        if not np.any(mask):
-            continue
+            bin_errors.append(bin_error)
+            bin_details.append(
+                {
+                    "lower": float(np.min(bin_probabilities)),
+                    "upper": float(np.max(bin_probabilities)),
+                    "count": int(len(indices)),
+                    "accuracy": bin_accuracy,
+                    "confidence": bin_confidence,
+                    "calibration_error": float(bin_error),
+                }
+            )
 
-        bin_confidence = confidence[mask].mean()
-        bin_accuracy = np.mean(
-            y_true[mask] == y_pred[mask]
-        )
-
-        bin_size = np.sum(mask)
-
-        ece += (
-            bin_size / len(confidence)
-            * abs(bin_accuracy - bin_confidence)
-        )
-
-        bins.append(
+        class_ace = float(np.mean(bin_errors))
+        class_errors.append(class_ace)
+        classwise_bins.append(
             {
-                "lower": float(lower),
-                "upper": float(upper),
-                "count": int(bin_size),
-                "accuracy": float(bin_accuracy),
-                "confidence": float(bin_confidence),
+                "class_index": class_index,
+                "ace": class_ace,
+                "bins": bin_details,
             }
         )
 
-    return float(ece), bins
+    return float(np.mean(class_errors)), classwise_bins
 
 
-def save_reliability_diagram(
-    bins,
+def save_classwise_reliability_diagram(
+    classwise_bins,
     output_path: Path,
 ):
-    """
-    Save a reliability diagram.
-    """
-
-    if not bins:
+    if not classwise_bins:
         return
 
-    accuracies = [
-        item["accuracy"]
-        for item in bins
-    ]
-
-    confidences = [
-        item["confidence"]
-        for item in bins
-    ]
-
-    plt.figure(figsize=(7, 7))
-
-    plt.plot(
+    fig, ax = plt.subplots(figsize=(8, 7))
+    ax.plot(
         [0, 1],
         [0, 1],
         linestyle="--",
+        color="black",
         label="Perfect calibration",
     )
 
-    plt.plot(
-        confidences,
-        accuracies,
-        marker="o",
-        label="Model",
-    )
+    for class_result in classwise_bins:
+        bins = class_result["bins"]
+        ax.plot(
+            [item["confidence"] for item in bins],
+            [item["accuracy"] for item in bins],
+            marker="o",
+            label=(
+                f"Class {class_result['class_index']} "
+                f"(ACE={class_result['ace']:.3f})"
+            ),
+        )
 
-    plt.xlabel("Confidence")
-    plt.ylabel("Accuracy")
-    plt.title("Reliability Diagram")
+    ax.set_xlabel("Mean class probability")
+    ax.set_ylabel("Empirical class frequency")
+    ax.set_title("Class-wise Adaptive Reliability Diagram")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.grid(True)
+    ax.legend(title="Class", fontsize="small")
 
-    plt.xlim(0, 1)
-    plt.ylim(0, 1)
-
-    plt.grid(True)
-    plt.legend()
-
-    plt.tight_layout()
-
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    plt.savefig(output_path)
-    plt.close()
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)

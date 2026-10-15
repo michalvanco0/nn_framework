@@ -1,0 +1,83 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage[hidelinks]{hyperref}
+
+\title{Calibration of Classifier Probability Outputs}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Calibration as a Measure of Trustworthiness}
+
+A classifier can achieve high accuracy while its predicted probabilities still fail to represent uncertainty reliably. Accuracy measures the proportion of correct predictions, but does not show whether the model's probability estimates match observed outcome frequencies. This property is known as \emph{probability calibration}. A classifier is calibrated when its predicted probabilities agree with the corresponding empirical frequencies.
+
+Let a classifier produce a probability vector $\mathbf{p}_i=(p_{i1},\ldots,p_{iK})$ for input $x_i$. For class $k$, let $p_{ik}$ be the predicted probability of that class. Class-wise calibration requires that
+\begin{equation}
+    P(Y=k\mid P_k=p)=p, \qquad k\in\{1,\ldots,K\}.
+    \label{eq:classwise-calibration}
+\end{equation}
+Thus, among examples for which a model assigns class $k$ a probability close to $0.8$, approximately $80\,\%$ should belong to class $k$. Calibration is a group-level property; it does not guarantee that an individual prediction is correct.
+
+Calibration contributes to trustworthiness because calibrated probabilities can support decisions about when a model's output should be reviewed by a person or passed to a downstream system. This is relevant in applications such as medical diagnosis and autonomous systems, where confident errors can have serious consequences \cite{guo2017,nixon2019}. Calibration is one aspect of trustworthiness, not a guarantee of overall correctness or robustness. Aggregate scores can also conceal differences between classes, so the class-wise results should be examined alongside the overall metric.
+
+\subsection{Calibration Evaluation}
+
+Calibration can be visualized with a \emph{reliability diagram}. For each class, examples are grouped by their predicted probability for that class, and the mean probability is compared with the observed frequency of that class. A perfectly calibrated model lies on the diagonal $y=x$.
+
+The \emph{Expected Calibration Error} (ECE) is a common summary of top-label calibration, used in the analysis by Guo et al. It groups predictions into fixed-width confidence bins and computes a weighted average of the absolute difference between accuracy and mean confidence \cite{guo2017}:
+\begin{equation}
+    \operatorname{ECE}=\sum_{m=1}^{M}\frac{|B_m|}{n}
+    \left|\operatorname{acc}(B_m)-\operatorname{conf}(B_m)\right|.
+    \label{eq:ece}
+\end{equation}
+Here $B_m$ is the set of examples in bin $m$, $n$ is the total number of examples, $\operatorname{acc}(B_m)$ is the bin accuracy, and $\operatorname{conf}(B_m)$ is the mean top-label confidence. A lower ECE indicates a smaller average mismatch under the selected binning scheme.
+
+Nixon et al. identify two important limitations of this ECE: it evaluates only the probability of the predicted class, and its fixed-width bins can contain very different numbers of examples. They also show that conclusions about calibration methods can depend on the metric and binning choices. They propose class-conditional metrics with adaptive, approximately equal-count bins. Their general recommendation is \emph{Adaptive Calibration Error} (ACE); for tasks with a large number of classes, such as 100 or more, they recommend thresholded ACE (TACE), which focuses on probabilities above a threshold \cite{nixon2019}.
+
+This thesis uses ACE as its primary calibration metric. The classifier has ten CIFAR-10 classes, so ACE is a suitable choice under Nixon et al.'s recommendation; TACE is intended for settings with many classes. ACE evaluates probabilities for every class, not only the class selected as the model's prediction, and adaptive bins reduce the imbalance caused by fixed-width intervals. For $K$ classes and $R$ adaptive bins per class, it is computed as
+\begin{equation}
+    \operatorname{ACE}=\frac{1}{KR}\sum_{k=1}^{K}\sum_{r=1}^{R}
+    \left|\operatorname{acc}(B_{k,r})-\operatorname{conf}(B_{k,r})\right|,
+    \label{eq:ace}
+\end{equation}
+where $B_{k,r}$ contains examples in the $r$-th adaptive bin for class $k$. Within that bin, accuracy is the empirical frequency of class $k$, and confidence is the mean predicted probability for class $k$. We use $R=10$ bins for each class. ACE remains a binned estimate and therefore depends on the number of bins and the evaluation sample. Its values are not directly comparable with ECE values; comparisons in this work use the same ACE definition and bin count. To make class-level differences visible, we report each class's ACE and show class-wise reliability curves alongside the macro-average ACE.
+
+\subsection{Research Developments and Applications}
+
+Guo et al. showed that increased classification accuracy does not necessarily produce better-calibrated predictions. In their experiments, network depth, width, batch normalization, and weight decay affected calibration. They also found that the post-hoc method \emph{temperature scaling} often calibrated predictions effectively. It divides logits $z_{ik}$ by a positive scalar $T$ before applying softmax:
+\begin{equation}
+    p_{ik}^{(T)}=\frac{\exp(z_{ik}/T)}{\sum_{j=1}^{K}\exp(z_{ij}/T)}.
+    \label{eq:temperature-scaling}
+\end{equation}
+Because $T>0$, the predicted class does not change, but the sharpness of the probability distribution does. The parameter is fitted on a separate calibration set. The present implementation evaluates calibration but does not apply temperature scaling; fitting it would require a held-out calibration split, separate from the test set.
+
+\section{Implementation of the Calibration Module}
+
+The experiment in \texttt{experiments/calibration.py} loads the CIFAR-10 test split and a trained ResNet-18 checkpoint. The \texttt{evaluate} function in \texttt{evaluation/evaluator.py} switches the model to evaluation mode, computes logits without gradients, and returns softmax probabilities and ground-truth labels. ACE uses the full probability vector for each example.
+
+The \texttt{calculate\_ace} function in \texttt{evaluation/calibration.py} processes each class probability separately. For each class, it sorts all examples by their predicted probability for that class and divides them into ten adaptive bins with approximately equal numbers of examples. In each bin, it compares the mean probability for the class with the empirical frequency of that class. The ACE is the unweighted average of these absolute gaps across classes and bins, as defined in Equation~\eqref{eq:ace}.
+
+The aggregate ACE is printed to the console. The aggregate and per-class results are saved to \texttt{results/calibration.json}, which records the model and dataset, the metric name, the number and type of bins, each class's ACE, and each bin's probability range, sample count, empirical frequency, and mean probability. A class-wise reliability diagram is saved to \texttt{results/reliability\_diagram.png}; it plots each class's adaptive-bin points against the diagonal for perfect calibration.
+
+The implementation measures ACE on the model's unadjusted softmax outputs; it does not modify model parameters or recalibrate probabilities. The ten-bin setting and class-wise results are reported to make the estimate reproducible and interpretable. Temperature scaling from Equation~\eqref{eq:temperature-scaling} could be added as a separate post-hoc step, with its parameter fitted on a held-out calibration set rather than the test set.
+
+\begin{thebibliography}{9}
+\bibitem{guo2017}
+C. Guo, G. Pleiss, Y. Sun, and K. Q. Weinberger.
+\newblock On Calibration of Modern Neural Networks.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine Learning}, PMLR, vol. 70, pp. 1321--1330, 2017.
+
+\bibitem{nixon2019}
+J. Nixon, M. W. Dusenberry, L. Zhang, G. Jerfel, and D. Tran.
+\newblock Measuring Calibration in Deep Learning.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops}, pp. 38--41, 2019.
+
+\end{thebibliography}
+
+\end{document}
