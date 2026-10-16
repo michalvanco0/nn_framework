@@ -1,5 +1,4 @@
 from pathlib import Path
-
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -104,6 +103,49 @@ def save_classwise_reliability_diagram(
     ax.set_ylim(0, 1)
     ax.grid(True)
     ax.legend(title="Class", fontsize="small")
+
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def save_classwise_ace_bar_chart(
+    classwise_bins,
+    output_path: Path,
+    class_names=None,
+    max_classes: int = 20,
+):
+    if not classwise_bins:
+        return
+    if class_names is not None and len(class_names) != len(classwise_bins):
+        raise ValueError("class_names must match the number of classes")
+    if max_classes < 1:
+        raise ValueError("max_classes must be at least 1")
+
+    ranked_classes = sorted(
+        classwise_bins,
+        key=lambda item: item["ace"],
+        reverse=True,
+    )[:max_classes]
+    class_indices = [item["class_index"] for item in ranked_classes]
+    labels = (
+        [class_names[class_index] for class_index in class_indices]
+        if class_names is not None
+        else [str(class_index) for class_index in class_indices]
+    )
+    ace_values = [item["ace"] for item in ranked_classes]
+
+    fig, ax = plt.subplots(figsize=(10, max(6, len(labels) * 0.35)))
+    bars = ax.barh(labels[::-1], ace_values[::-1])
+    ax.bar_label(bars, fmt="%.3f", padding=3)
+    ax.set_xlabel("Adaptive calibration error (ACE)")
+    ax.set_ylabel("Class")
+    ax.set_title(
+        f"Worst-calibrated Classes (top {len(ranked_classes)})"
+    )
+    ax.set_xlim(0, max(0.1, max(ace_values) * 1.15))
+    ax.grid(axis="x", alpha=0.3)
 
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)

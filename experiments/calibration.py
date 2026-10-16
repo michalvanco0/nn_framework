@@ -1,20 +1,26 @@
 from __future__ import annotations
-
 import argparse
 import json
+import math
 from pathlib import Path
-
 import torch
 from torch import nn
 from torchvision.models import resnet18 as torchvision_resnet18
-
 from datasets.cifar10 import get_cifar10_dataloaders
 from evaluation.calibration import (
     calculate_ace,
+    save_classwise_ace_bar_chart,
     save_classwise_reliability_diagram,
 )
 from evaluation.evaluator import evaluate
 from models.resnet import create_resnet18
+
+
+def _num_calibration_bins(num_samples: int) -> int:
+    # Sturges' rule
+    if num_samples < 1:
+        raise ValueError("Calibration requires at least one sample")
+    return max(1, math.ceil(math.log2(num_samples) + 1))
 
 
 def run_calibration(
@@ -94,10 +100,11 @@ def run_calibration(
         device,
     )
 
+    num_bins = _num_calibration_bins(len(evaluation["y_true"]))
     ace, classwise_bins = calculate_ace(
         y_true=evaluation["y_true"],
         probabilities=evaluation["probabilities"],
-        num_bins=10,
+        num_bins=num_bins,
     )
 
     print(f"ACE: {ace:.4f}")
@@ -108,12 +115,20 @@ def run_calibration(
     )
 
     diagram_path = (
-        output_dir / "reliability_diagram.png"
+        output_dir / "reliability_diagram.pdf"
+    )
+    ace_chart_path = (
+        output_dir / "classwise_ace.pdf"
     )
 
     save_classwise_reliability_diagram(
         classwise_bins=classwise_bins,
         output_path=diagram_path,
+    )
+    save_classwise_ace_bar_chart(
+        classwise_bins=classwise_bins,
+        output_path=ace_chart_path,
+        class_names=class_names,
     )
 
     result = {
@@ -121,8 +136,11 @@ def run_calibration(
         "dataset": "CIFAR10",
         "metric": "ACE",
         "ace": ace,
-        "num_bins": 10,
+        "num_bins": num_bins,
+        "num_bins_rule": "Sturges' rule: ceil(log2(number of samples) + 1)",
         "binning": "class-wise adaptive equal-count bins",
+        "reliability_diagram": diagram_path.name,
+        "classwise_ace_chart": ace_chart_path.name,
         "classwise_bins": classwise_bins,
     }
 
@@ -147,6 +165,9 @@ def run_calibration(
     print(
         f"Reliability diagram saved to: {diagram_path}"
     )
+    print(
+        f"Class-wise ACE chart saved to: {ace_chart_path}"
+    )
 
     return result
 
@@ -165,7 +186,10 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path("results"),
-        help="Directory for calibration.json and reliability_diagram.png",
+        help=(
+            "Directory for calibration.json, reliability_diagram.pdf, "
+            "and classwise_ace.pdf"
+        ),
     )
     parser.add_argument(
         "--data-dir",
