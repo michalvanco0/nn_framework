@@ -1,0 +1,154 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage[hidelinks]{hyperref}
+\usepackage{graphicx}
+
+\makeatletter
+\setlength{\@fptop}{0pt}
+\setlength{\@fpbot}{0pt plus 1fil}
+\makeatother
+
+\title{Fairness Evaluation of Classification Models}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Fairness as a Measure of Trustworthiness}
+
+A model's average accuracy can conceal differences in its errors across groups of people. A classifier may correctly predict the outcome for one group more often than for another, or it may produce more false positives for a particular group. Such differences matter when predictions inform decisions about people. Fairness evaluation therefore complements measures such as accuracy, calibration, and robustness by describing how model outcomes vary across specified groups.
+
+Fairness is not a single property that can be assessed without reference to the task and its context. A measurement requires, at minimum, ground-truth outcomes, model predictions, and group membership for the same examples. Let $Y$ be the true outcome, $\widehat{Y}$ the classifier's prediction, and $A$ a specified sensitive attribute. The choice of fairness criterion determines which aspects of the joint distribution of $(Y,\widehat{Y},A)$ are compared. Hardt, Price, and Srebro describe this family of tests as \emph{oblivious} because they use these observed variables rather than examining the model's internal structure or the causal process that produced the data \cite{hardt2016}.
+
+Simply omitting a sensitive attribute from the model inputs does not ensure that its predictions are independent of that attribute. Other features can act as proxies for group membership. Consequently, a group-aware evaluation may need access to the sensitive attribute even when the deployed model does not use it to make predictions \cite{hardt2016}. The measurements in this chapter are intended to describe observed differences. They do not, by themselves, determine whether a model is fair or suitable for a particular use.
+
+\subsection{Equalized Odds and Equal Opportunity}
+
+For a binary classification task, assume that $Y,\widehat{Y}\in\{0,1\}$ and that $A$ identifies a group. The true-positive rate (TPR) and false-positive rate (FPR) for group $a$ are
+\begin{align}
+    \operatorname{TPR}_a &= \Pr(\widehat{Y}=1\mid Y=1,A=a), \\
+    \operatorname{FPR}_a &= \Pr(\widehat{Y}=1\mid Y=0,A=a).
+    \label{eq:group-error-rates}
+\end{align}
+The TPR measures how often positive outcomes are correctly identified; the FPR measures how often negative outcomes are incorrectly predicted as positive.
+
+\emph{Equalized odds} requires the prediction to be independent of group membership conditional on the true outcome. For binary outcomes, this means that both rates in Equation~\eqref{eq:group-error-rates} are equal across groups:
+\begin{equation}
+    \operatorname{TPR}_a=\operatorname{TPR}_{a'}
+    \quad\text{and}\quad
+    \operatorname{FPR}_a=\operatorname{FPR}_{a'}
+    \qquad\text{for all groups }a,a'.
+    \label{eq:equalized-odds}
+\end{equation}
+The first condition compares error rates among examples with a positive outcome; the second compares error rates among examples with a negative outcome. Equalized odds therefore examines both kinds of errors rather than only the model's overall rate of positive predictions \cite{hardt2016}.
+
+\emph{Equal opportunity} is a less restrictive criterion. It requires equal TPR across groups for the positive outcome, but does not constrain FPR:
+\begin{equation}
+    \operatorname{TPR}_a=\operatorname{TPR}_{a'}
+    \qquad\text{for all groups }a,a'.
+    \label{eq:equal-opportunity}
+\end{equation}
+This criterion can be relevant when the evaluation focuses on whether qualified or otherwise positive cases have a comparable chance of receiving a positive prediction. The meaning of the positive class must be specified for each application; reversing the positive label changes the interpretation of the rates.
+
+These criteria can be reported as differences between observed rates. For example, for a set of groups $\mathcal{A}$, the TPR range is
+\begin{equation}
+    \Delta_{\mathrm{TPR}} = \max_{a\in\mathcal{A}}\operatorname{TPR}_a
+    - \min_{a\in\mathcal{A}}\operatorname{TPR}_a,
+    \label{eq:tpr-range}
+\end{equation}
+with an analogous range for FPR. A range of zero means that the estimated rate is the same for all included groups in the evaluated sample. The range does not explain why the rates differ, and it does not establish whether a particular difference is acceptable for the intended use.
+
+\subsection{Other Group Comparisons}
+
+Different fairness criteria focus on different quantities, so a report should keep their measurements distinct. For example, demographic parity compares the rate of positive predictions without conditioning on the true outcome. Its group-specific selection rate is
+\begin{equation}
+    \operatorname{SR}_a=\Pr(\widehat{Y}=1\mid A=a).
+    \label{eq:selection-rate}
+\end{equation}
+Differences in selection rates can be useful to inspect, but they do not show whether the classifier makes similar errors among examples with the same outcome. Hardt et al. discuss how demographic parity can impose a substantial utility cost when the outcome itself is associated with group membership \cite{hardt2016}.
+
+Predictive values provide another view of model behavior. The positive predictive value is $\Pr(Y=1\mid\widehat{Y}=1,A=a)$, while the negative predictive value is $\Pr(Y=0\mid\widehat{Y}=0,A=a)$. These answer questions about the correctness of positive and negative predictions within each group. Accuracy, balanced accuracy, precision, recall, and F1 score add further summaries, but each depends on the outcome distribution and the selected class definitions. Reporting group sample counts and true-outcome distributions helps put these values in context.
+
+For multiclass classification, the framework evaluates each class against all other classes. For class $k$ and group $a$, the class-wise TPR is
+\begin{equation}
+    \operatorname{TPR}_{a,k}=\Pr(\widehat{Y}=k\mid Y=k,A=a),
+    \label{eq:multiclass-tpr}
+\end{equation}
+and the corresponding FPR is $\Pr(\widehat{Y}=k\mid Y\ne k,A=a)$. This one-versus-rest view makes it possible to inspect which classes contribute to a group-level difference. Some rates may be undefined when a group contains no positive or no negative examples for a class; such values should be reported as unavailable rather than interpreted as zero.
+
+\subsection{Score-Based Evaluation and ROC Curves}
+
+Many classifiers produce a real-valued score $R$ in addition to a binary decision. Applying a threshold $t$ produces a prediction $\widehat{Y}=\mathbb{1}\{R>t\}$. Changing the threshold changes the TPR and FPR. A receiver operating characteristic (ROC) curve plots these rates over thresholds. For group $a$, the conditional ROC curve can be written as
+\begin{equation}
+    C_a(t)=\left(
+    \Pr(R>t\mid Y=0,A=a),
+    \Pr(R>t\mid Y=1,A=a)
+    \right).
+    \label{eq:conditional-roc}
+\end{equation}
+Hardt et al. show that, for a score and a binary outcome, equalized odds corresponds to agreement of the group-conditional ROC curves across thresholds. When the curves differ, equalized odds may require group-dependent thresholds and, in some cases, randomization. This is a post-processing approach discussed in the paper; the evaluation module in this project measures group differences but does not alter predictions or apply fairness constraints \cite{hardt2016}.
+
+A conventional ROC curve for the whole test set describes a model's ability to separate positive from negative outcomes. It is not, on its own, a group fairness measurement. To inspect equalized odds using ROC curves, the outcome must be binary and there must be both positive and negative examples within each evaluated group. The curves then need to be compared across those groups.
+
+\section{Fairness Evaluation in This Project}
+
+The evaluation API works independently of model architecture and dataset. It accepts aligned ground-truth labels and predictions, one or more categorical group attributes, and optionally predicted probabilities. The same interface can be used for image, text, or tabular classifiers if the group metadata is available in the same sample order. A meaningful group analysis depends on the definition and quality of these attributes and labels; the metrics cannot validate their social or causal interpretation.
+
+For each supplied attribute, the report records group sizes, missing attribute values, and the distributions of true and predicted classes. It then provides group-level accuracy, balanced accuracy, macro precision, macro recall, and macro F1. For each class, it reports selection rate, TPR, FPR, false-negative rate, true-negative rate, positive predictive value, negative predictive value, and F1. Between-group ranges summarize the spread of these measurements. Optional reference-group comparisons report signed differences relative to a group selected by the caller; the implementation does not choose a reference group automatically.
+
+When probabilities are supplied, the report also contains group-level Brier score, log loss, top-label expected calibration error (ECE), class-wise ECE, and one-versus-rest ROC AUC. Pairwise ABROCA summarizes the area between group ROC curves where the required positive and negative examples are present. These probability-quality metrics complement the threshold-based rates: calibration differences and equalized-odds differences describe distinct properties and should not be collapsed into one score. For selective classifiers, an accepted-sample mask can be used to report coverage and accuracy among accepted predictions.
+
+The results are descriptive estimates from the evaluated sample. The current implementation reports small-group warnings but does not calculate confidence intervals or statistical significance tests. Missing sensitive attributes, classes absent within a group, or small group counts can limit which comparisons are defined and how precisely they are estimated. The selected metrics do not establish a causal explanation for a difference, evaluate individual or counterfactual fairness, or decide whether a model is suitable for a particular application.
+
+\subsection{Illustrative CIFAR-10 Analysis}
+
+The repository's current ResNet-18 model is evaluated on CIFAR-10, which contains object classes but no demographic attributes. For an executable demonstration, the ten object classes are grouped into the superclasses \emph{animals} and \emph{vehicles}. These groups are derived from the ground-truth class. They therefore illustrate class-superclass performance and probability quality, but they are not protected demographic groups and cannot support a demographic fairness conclusion.
+
+Figure~\ref{fig:fairness-group-metrics} compares selected descriptive measurements for the two superclasses. On the 10,000-example test set, the observed accuracy is $0.8750$ for animals ($n=6{,}000$) and $0.9368$ for vehicles ($n=4{,}000$), a difference of $0.0617$. The same figure shows Brier score, log loss, and top-label ECE separately. These are observations for this particular class grouping; they do not establish the cause or acceptability of the differences.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{../results/fairness_cifar10_superclasses_group_metrics.pdf}
+    \caption{Accuracy and probability-quality measurements by CIFAR-10 target superclass. The superclass groups are derived from the ground-truth class and are not demographic attributes.}
+    \label{fig:fairness-group-metrics}
+\end{figure}
+
+Figure~\ref{fig:fairness-superclass-roc} plots the ROC curve after collapsing the model's ten class probabilities into vehicle and animal probability mass. Its AUC is $0.9988$. This curve measures discrimination between the two target superclasses; it is not a set of group-conditional ROC curves and does not measure equalized odds across protected groups.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.82\textwidth]{../results/fairness_cifar10_superclasses_superclass_roc.pdf}
+    \caption{ROC curve for vehicle-versus-animal superclass classification, obtained by summing the CIFAR-10 class probabilities within each superclass. It is an illustrative classification curve, not a demographic group comparison.}
+    \label{fig:fairness-superclass-roc}
+\end{figure}
+
+\section{Implementation of the Fairness Module}
+
+The generic metric calculation is implemented in \path{evaluation/fairness.py} and exposed through \path{experiments/fairness.py}. The function \path{calculate_fairness_metrics} takes $Y$, $\widehat{Y}$, group attributes, and optional probabilities. It computes each supplied attribute separately and preserves the class-wise and group-wise values in a structured report. The report has no aggregate fairness score, threshold, model ranking, or fair/unfair verdict.
+
+The runnable CIFAR-10 example is in \path{experiments/fairness_cifar10.py}. It loads the existing ResNet-18 checkpoint, evaluates the CIFAR-10 test split, derives the illustrative superclass labels, and writes the measurements to a JSON report in the results directory. The group-metric chart and superclass ROC curve are saved as PNG, PDF, and SVG files. The ROC curve in this example is a binary superclass classification plot; group-conditional ROC comparisons for equalized odds require valid sensitive-group labels and a binary outcome represented by both positive and negative examples within each group.
+
+To run the example from the project root in PowerShell, use:
+\begin{verbatim}
+.\.venv\Scripts\python.exe -m experiments.fairness_cifar10
+\end{verbatim}
+
+For a demographic fairness evaluation, a caller must provide relevant group attributes for the evaluated samples. The measured quantities should be selected in relation to the task and intended use, reported with their group counts and outcome distributions, and interpreted alongside other properties such as accuracy and calibration. The purpose of this module is to make observed differences and unmeasured dimensions visible for that assessment, not to issue a universal judgment about a model.
+
+\begin{thebibliography}{9}
+
+\bibitem{hardt2016}
+M. Hardt, E. Price, and N. Srebro.
+\newblock Equality of Opportunity in Supervised Learning.
+\newblock In \emph{Advances in Neural Information Processing Systems 29}, 2016.
+\newblock \url{https://papers.neurips.cc/paper_files/paper/2016/file/6a9659feb1216f14f7384ba499518b38-Paper.pdf}.
+
+\end{thebibliography}
+
+\end{document}
