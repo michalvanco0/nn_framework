@@ -211,37 +211,15 @@ def _class_distribution(values: np.ndarray, class_labels: list[Any]) -> list[dic
     return distribution
 
 
-def _expected_calibration_error(
-    confidence: np.ndarray,
-    correct: np.ndarray,
-    num_bins: int,
-) -> float | None:
-    if len(confidence) == 0:
-        return None
-
-    bin_indices = np.minimum((confidence * num_bins).astype(int), num_bins - 1)
-    error = 0.0
-    for bin_index in range(num_bins):
-        mask = bin_indices == bin_index
-        if np.any(mask):
-            error += float(np.mean(mask)) * abs(
-                float(np.mean(correct[mask])) - float(np.mean(confidence[mask]))
-            )
-    return float(error)
-
-
 def _probability_metrics(
     y_true: np.ndarray,
     probabilities: np.ndarray,
     class_labels: list[Any],
-    num_bins: int,
 ) -> dict[str, Any]:
     if len(y_true) == 0:
         return {
             "brier_score": None,
             "log_loss": None,
-            "top_label_ece": None,
-            "classwise_ece": [],
             "classwise_roc_auc": [],
         }
 
@@ -258,16 +236,6 @@ def _probability_metrics(
     brier_score = float(np.mean(np.sum((probabilities - one_hot) ** 2, axis=1)))
     log_loss = float(-np.mean(np.log(clipped[np.arange(len(y_true)), true_indices])))
 
-    top_indices = np.argmax(probabilities, axis=1)
-    top_confidence = probabilities[np.arange(len(y_true)), top_indices]
-    top_correct = top_indices == true_indices
-    top_label_ece = _expected_calibration_error(
-        top_confidence,
-        top_correct,
-        num_bins,
-    )
-
-    classwise_ece = []
     classwise_roc_auc = []
     for class_index, label in enumerate(class_labels):
         binary_truth = one_hot[:, class_index].astype(int)
@@ -275,16 +243,6 @@ def _probability_metrics(
             float(roc_auc_score(binary_truth, probabilities[:, class_index]))
             if len(np.unique(binary_truth)) == 2
             else None
-        )
-        classwise_ece.append(
-            {
-                "class_label": _json_value(label),
-                "ece": _expected_calibration_error(
-                    probabilities[:, class_index],
-                    one_hot[:, class_index].astype(bool),
-                    num_bins,
-                ),
-            }
         )
         classwise_roc_auc.append(
             {
@@ -296,8 +254,6 @@ def _probability_metrics(
     return {
         "brier_score": brier_score,
         "log_loss": log_loss,
-        "top_label_ece": top_label_ece,
-        "classwise_ece": classwise_ece,
         "classwise_roc_auc": classwise_roc_auc,
     }
 
@@ -414,7 +370,7 @@ def _group_ranges(
         )
     result["per_class"] = per_class_ranges
 
-    probability_metrics = ("brier_score", "log_loss", "top_label_ece")
+    probability_metrics = ("brier_score", "log_loss")
     result["probability_quality"] = {
         metric: _gap(
             [
@@ -429,23 +385,6 @@ def _group_ranges(
         )
         for metric in probability_metrics
     }
-    result["probability_quality"]["classwise_ece"] = [
-        {
-            "class_label": _json_value(label),
-            "gap": _gap(
-                [
-                    (
-                        group["group"],
-                        None
-                        if group["probability_metrics"] is None
-                        else group["probability_metrics"]["classwise_ece"][class_index]["ece"],
-                    )
-                    for group in group_results
-                ]
-            ),
-        }
-        for class_index, label in enumerate(class_labels)
-    ]
     result["probability_quality"]["classwise_roc_auc_gap"] = [
         {
             "class_label": _json_value(label),
@@ -653,7 +592,6 @@ def calculate_fairness_metrics(
     positive_label: Any | None = None,
     reference_groups: Mapping[str, Any] | None = None,
     accepted_mask: Any | None = None,
-    num_bins: int = 10,
     small_group_warning_threshold: int | None = 30,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -706,8 +644,6 @@ def calculate_fairness_metrics(
     if positive_label is None and len(labels) == 2 and set(labels) == {0, 1}:
         positive_label = 1
 
-    if num_bins < 1:
-        raise ValueError("num_bins must be at least 1")
     if small_group_warning_threshold is not None and small_group_warning_threshold < 1:
         raise ValueError("small_group_warning_threshold must be positive or None")
 
@@ -796,7 +732,6 @@ def calculate_fairness_metrics(
                     true_values[indices],
                     probability_values[indices],
                     labels,
-                    num_bins,
                 )
 
             coverage = float(len(evaluated_indices) / len(indices))
@@ -890,7 +825,7 @@ def calculate_fairness_metrics(
     overall_probability_metrics = (
         None
         if probability_values is None
-        else _probability_metrics(true_values, probability_values, labels, num_bins)
+        else _probability_metrics(true_values, probability_values, labels)
     )
 
     return {
@@ -906,7 +841,6 @@ def calculate_fairness_metrics(
         "class_labels": [_json_value(label) for label in labels],
         "positive_label": _json_value(positive_label),
         "probability_metrics_included": probability_values is not None,
-        "probability_bins": num_bins if probability_values is not None else None,
         "selective_metrics_included": accepted_mask is not None,
         "small_group_warning_threshold": small_group_warning_threshold,
         "classification_metric_population": (
@@ -922,7 +856,7 @@ def calculate_fairness_metrics(
             "Metric meaning depends on the selected task, class, sensitive attributes, and context.",
             "Group gaps describe observed differences and do not establish their cause or social meaning.",
             "Different fairness criteria can disagree; the report keeps their measurements separate.",
-            "Calibration metrics require predicted probabilities and depend on the selected binning.",
+            "Probability-quality metrics require predicted probabilities. Calibration error is evaluated separately with ACE in the calibration module.",
             "No confidence intervals or statistical significance tests are calculated.",
             "Reference-based differences are emitted only for reference groups supplied by the caller.",
             "This module covers classification; causal, individual, ranking, and regression fairness require task-specific inputs and assumptions.",

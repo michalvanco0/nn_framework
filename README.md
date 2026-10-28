@@ -80,24 +80,40 @@ report = run_fairness_audit(
 )
 ```
 
-To try the audit with the repository's existing CIFAR-10 ResNet-18 checkpoint,
-run this from the project root in PowerShell:
+For a console workflow independent of the model framework, export one CSV row
+per evaluated example. Keep labels, predictions, group attributes, and optional
+probability columns on the same row:
 
 ```powershell
-.\.venv\Scripts\python.exe -m experiments.fairness_cifar10
+.\.venv\Scripts\python.exe -m experiments.fairness_csv --input predictions.csv --label-column y_true --prediction-column y_pred --group-columns sex age_band --class-labels no yes --probability-columns p_no p_yes --reference-group sex=female --model-name my-model --dataset-name my-dataset --split-name test --output results/fairness.json
 ```
 
-This evaluates the test set and writes
-`results/fairness_cifar10_superclasses.json`. The example groups CIFAR-10 classes
-into animals and vehicles to demonstrate the interface. These groups are derived
-from the target class, so this is only an exploratory class-superclass performance
-profile, not a demographic fairness audit. For demographic analysis, pass real
-group attributes aligned with the evaluated samples to `run_fairness_audit`.
-The command also saves a group-metrics chart and a binary ROC curve for the
-collapsed vehicle-versus-animal prediction, each as PNG, PDF, and SVG beside the
-JSON file. This ROC curve measures superclass discrimination; it is not a
-comparison of ROC curves across demographic groups. Group ROC comparisons need
-the same binary outcome represented in each group.
+The class-label order must match the probability-column order. With no
+probabilities, probability-quality, ABROCA, and ROC-curve results are omitted.
+When scores are present, the adapter saves a separate group-conditional,
+one-versus-rest ROC comparison for each class that has both outcomes in at least
+two groups. This adapter reads predictions from any model; it does not load or
+modify the model.
+
+The generic function above works with predictions from any classification
+model. CIFAR-10 itself has no demographic or other supplied group attributes,
+so a fairness audit must not invent groups from its target classes. To audit the
+repository's CIFAR-10 checkpoint, provide an external CSV with one row per test
+example in exactly the test loader's order:
+
+```powershell
+.\.venv\Scripts\python.exe -m experiments.fairness_cifar10 --group-metadata data/cifar10_test_groups.csv --group-columns sex age_band
+```
+
+The CSV must contain the named group columns, and its rows must align one-to-one
+with the CIFAR-10 test examples returned by the test loader. The command writes
+`results/fairness_cifar10.json`, a group-metrics chart for each supplied
+attribute, and group-conditional ROC comparisons when classes are represented
+in multiple groups. If group metadata is unavailable, the model can still be
+evaluated for ordinary classification performance, but no fairness comparison
+can be reported. The earlier animals-versus-vehicles output was derived from
+target classes and is only a class-composition profile; it must not be
+interpreted as a demographic fairness result.
 
 The report contains group-level values and between-group ranges for:
 
@@ -112,10 +128,9 @@ The report contains group-level values and between-group ranges for:
   signed statistical parity, equal-opportunity, FPR, predictive-parity, and
   negative-predictive-parity differences; disparate-impact ratios; and average
   odds difference relative to that reference group.
-- With probabilities: per-group multiclass Brier score, log loss, top-label
-  ECE, classwise ECE, and one-versus-rest ROC AUC, with gaps between groups.
-  Pairwise ABROCA comparisons measure the area between group ROC curves across
-  thresholds.
+- With probabilities: per-group multiclass Brier score, log loss, and
+  one-versus-rest ROC AUC, with gaps between groups. Pairwise ABROCA comparisons
+  measure the area between group ROC curves across thresholds.
 - With `accepted_mask` for selective classifiers: group coverage and accuracy
   among accepted predictions.
 
@@ -139,8 +154,9 @@ alongside the model's performance when it does make a prediction.
 Optional `metadata` can record the model, dataset, evaluation split, and
 intended use beside the measurements. The small-group warning threshold is
 configurable and does not act as a fairness cutoff. The report does not
-calculate confidence intervals or significance tests. ECE uses equal-width
-probability bins; the bin count is included in the report.
+calculate confidence intervals or significance tests. Calibration error is
+measured separately with ACE in the calibration module; the fairness report
+does not calculate ECE.
 
 There is deliberately no combined fairness score, threshold, or model ranking.
 The report makes observed group differences visible so that model suitability

@@ -3,14 +3,22 @@ import argparse
 import json
 import math
 from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import torch
 from torch import nn
 from torchvision.models import resnet18 as torchvision_resnet18
 from datasets.cifar10 import get_cifar10_dataloaders
 from evaluation.calibration import (
     calculate_ace,
-    save_classwise_ace_bar_chart,
+    calculate_ece,
+    save_classwise_ace_reliability_diagram,
     save_classwise_reliability_diagram,
+    save_ece_reliability_diagram,
 )
 from evaluation.evaluator import evaluate
 from models.resnet import create_resnet18
@@ -23,6 +31,29 @@ def _num_calibration_bins(num_samples: int) -> int:
     return max(1, math.ceil(math.log2(num_samples) + 1))
 
 
+def _resolve_class_index(class_name: str, class_names) -> int:
+    requested = str(class_name).strip().casefold()
+    matches = [
+        index
+        for index, available_name in enumerate(class_names)
+        if available_name.casefold() == requested
+    ]
+    if matches:
+        return matches[0]
+    try:
+        class_index = int(requested)
+    except ValueError as error:
+        raise ValueError(
+            f"Unknown comparison class {class_name!r}. Choose one of: "
+            f"{', '.join(class_names)}"
+        ) from error
+    if not 0 <= class_index < len(class_names):
+        raise ValueError(
+            f"Comparison class index must be between 0 and {len(class_names) - 1}"
+        )
+    return class_index
+
+
 def run_calibration(
     data_dir: Path = Path("data"),
     results_dir: Path = Path("results"),
@@ -31,6 +62,8 @@ def run_calibration(
     checkpoint_path: Path | None = None,
     output_dir: Path | None = None,
     architecture: str = "auto",
+    comparison_class: str = "cat",
+    ece_num_bins: int = 10,
 ):
     device = torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -100,6 +133,12 @@ def run_calibration(
         device,
     )
 
+    top_label_ece, top_label_ece_bins = calculate_ece(
+        y_true=evaluation["y_true"],
+        y_pred=evaluation["y_pred"],
+        confidence=evaluation["confidence"],
+        num_bins=ece_num_bins,
+    )
     num_bins = _num_calibration_bins(len(evaluation["y_true"]))
     ace, classwise_bins = calculate_ace(
         y_true=evaluation["y_true"],
@@ -107,6 +146,15 @@ def run_calibration(
         num_bins=num_bins,
     )
 
+    comparison_class_index = _resolve_class_index(
+        comparison_class,
+        class_names,
+    )
+    comparison_class_name = class_names[comparison_class_index]
+    comparison_class_result = classwise_bins[comparison_class_index]
+    comparison_class_ace = comparison_class_result["ace"]
+
+    print(f"Top-label ECE ({ece_num_bins} fixed-width bins): {top_label_ece:.4f}")
     print(f"ACE: {ace:.4f}")
 
     output_dir.mkdir(
@@ -117,18 +165,24 @@ def run_calibration(
     diagram_path = (
         output_dir / "reliability_diagram.pdf"
     )
-    ace_chart_path = (
-        output_dir / "classwise_ace.pdf"
+    ece_diagram_path = output_dir / "ece_reliability_diagram.pdf"
+    classwise_ace_diagram_path = (
+        output_dir / "classwise_ace_reliability_diagram.pdf"
     )
 
     save_classwise_reliability_diagram(
         classwise_bins=classwise_bins,
         output_path=diagram_path,
     )
-    save_classwise_ace_bar_chart(
-        classwise_bins=classwise_bins,
-        output_path=ace_chart_path,
-        class_names=class_names,
+    save_ece_reliability_diagram(
+        bins=top_label_ece_bins,
+        ece=top_label_ece,
+        output_path=ece_diagram_path,
+    )
+    save_classwise_ace_reliability_diagram(
+        class_result=comparison_class_result,
+        class_name=comparison_class_name,
+        output_path=classwise_ace_diagram_path,
     )
 
     result = {
@@ -136,11 +190,21 @@ def run_calibration(
         "dataset": "CIFAR10",
         "metric": "ACE",
         "ace": ace,
+        "top_label_ece": top_label_ece,
+        "top_label_ece_num_bins": ece_num_bins,
+        "top_label_ece_binning": "fixed-width confidence bins",
+        "top_label_ece_bins": top_label_ece_bins,
+        "comparison_class": {
+            "name": comparison_class_name,
+            "index": comparison_class_index,
+            "adaptive_classwise_ace": comparison_class_ace,
+        },
         "num_bins": num_bins,
         "num_bins_rule": "Sturges' rule: ceil(log2(number of samples) + 1)",
         "binning": "class-wise adaptive equal-count bins",
         "reliability_diagram": diagram_path.name,
-        "classwise_ace_chart": ace_chart_path.name,
+        "top_label_ece_reliability_diagram": ece_diagram_path.name,
+        "comparison_class_ace_reliability_diagram": classwise_ace_diagram_path.name,
         "classwise_bins": classwise_bins,
     }
 
@@ -165,9 +229,8 @@ def run_calibration(
     print(
         f"Reliability diagram saved to: {diagram_path}"
     )
-    print(
-        f"Class-wise ACE chart saved to: {ace_chart_path}"
-    )
+    print(f"Top-label ECE diagram saved to: {ece_diagram_path}")
+    print(f"Class-wise ACE diagram saved to: {classwise_ace_diagram_path}")
 
     return result
 
@@ -186,10 +249,7 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path("results"),
-        help=(
-            "Directory for calibration.json, reliability_diagram.pdf, "
-            "and classwise_ace.pdf"
-        ),
+        help="Directory for calibration.json and calibration diagrams",
     )
     parser.add_argument(
         "--data-dir",
@@ -205,6 +265,18 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="ResNet-18 variant; auto selects from conv1 kernel size",
     )
+    parser.add_argument(
+        "--comparison-class",
+        type=str,
+        default="cat",
+        help="CIFAR-10 class name or index for the class-wise ACE diagram",
+    )
+    parser.add_argument(
+        "--ece-bins",
+        type=int,
+        default=10,
+        help="Number of fixed-width bins used for ECE (default: 10)",
+    )
     return parser.parse_args()
 
 
@@ -218,4 +290,6 @@ if __name__ == "__main__":
         checkpoint_path=args.checkpoint,
         output_dir=args.output_dir,
         architecture=args.architecture,
+        comparison_class=args.comparison_class,
+        ece_num_bins=args.ece_bins,
     )

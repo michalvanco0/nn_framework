@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.24 (MiKTeX 22.7) (preloaded format=pdflatex 2022.10.6)  21 OCT 2026 23:30
+This is pdfTeX, Version 3.141592653-2.6-1.40.24 (MiKTeX 22.7) (preloaded format=pdflatex 2022.10.6)  22 OCT 2026 09:19
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -458,45 +458,34 @@ LaTeX Font Info:    External font `lmex10' loaded for size
 [1
 
 {C:/Users/User/AppData/Local/MiKTeX/fonts/map/pdftex/pdftex.map}] [2]
-[3] [4]
-<../results/fairness_cifar10_superclasses_group_metrics.pdf, id=77, 932.01024pt
- x 616.10504pt>
-File: ../results/fairness_cifar10_superclasses_group_metrics.pdf Graphic file (
-type pdf)
-<use ../results/fairness_cifar10_superclasses_group_metrics.pdf>
-Package pdftex.def Info: ../results/fairness_cifar10_superclasses_group_metrics
-.pdf  used on input line 117.
-(pdftex.def)             Requested size: 390.0pt x 257.80345pt.
-<../results/fairness_cifar10_superclasses_superclass_roc.pdf, id=79, 570.68567p
-t x 498.10356pt>
-File: ../results/fairness_cifar10_superclasses_superclass_roc.pdf Graphic file 
-(type pdf)
-<use ../results/fairness_cifar10_superclasses_superclass_roc.pdf>
-Package pdftex.def Info: ../results/fairness_cifar10_superclasses_superclass_ro
-c.pdf  used on input line 126.
-(pdftex.def)             Requested size: 319.80286pt x 279.1413pt.
-LaTeX Font Info:    Trying to load font information for T1+lmtt on input line 1
-33.
+[3]
+LaTeX Font Info:    Trying to load font information for T1+lmtt on input line 8
+9.
  (C:\Users\User\AppData\Local\Programs\MiKTeX\tex/latex/lm\t1lmtt.fd
 File: t1lmtt.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 )
-[5] [6 <../results/fairness_cifar10_superclasses_group_metrics.pdf>] [7 <../res
-ults/fairness_cifar10_superclasses_superclass_roc.pdf>] [8] (fairness.aux)
+[4]
+Overfull \hbox (91.65024pt too wide) in paragraph at lines 98--98
+[]    \T1/lmtt/m/n/12 --input predictions.csv --label-column y_true --predictio
+n-column y_pred `[] 
+ []
+
+[5] [6] (fairness.aux)
 Package rerunfilecheck Info: File `fairness.out' has not changed.
-(rerunfilecheck)             Checksum: 71E64855D45C8CCEEC0C94DD25528C20;1622.
+(rerunfilecheck)             Checksum: 27A4243DB7C4D0B7011A917BF5D745A1;1853.
  ) 
 Here is how much of TeX's memory you used:
- 10806 strings out of 478338
- 172525 string characters out of 2837172
- 476300 words of memory out of 3000000
- 29039 multiletter control sequences out of 15000+600000
+ 10789 strings out of 478338
+ 171613 string characters out of 2837172
+ 478883 words of memory out of 3000000
+ 29025 multiletter control sequences out of 15000+600000
  523214 words of font info for 71 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 72i,9n,77p,726b,458s stack positions out of 10000i,1000n,20000p,200000b,80000s
+ 72i,10n,77p,809b,572s stack positions out of 10000i,1000n,20000p,200000b,80000s
 {C:/Users/User/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-ec.enc}{C:
-/Users/User/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-rm.enc}{C:/User
-s/User/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-mathsy.enc}{C:/Users
-/User/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-mathit.enc}{C:/Users/
+/Users/User/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-mathsy.enc}{C:/
+Users/User/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-mathit.enc}{C:/U
+sers/User/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-rm.enc}{C:/Users/
 User/AppData/Local/Programs/MiKTeX/fonts/enc/dvips/lm/lm-mathex.enc}<C:/Users/U
 ser/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmbx12.pfb><C:/Users/Us
 er/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmex10.pfb><C:/Users/Use
@@ -504,16 +493,13 @@ r/AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmmi12.pfb><C:/Users/User
 /AppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmmi8.pfb><C:/Users/User/A
 ppData/Local/Programs/MiKTeX/fonts/type1/public/lm/lmr12.pfb><C:/Users/User/App
 Data/Local/Programs/MiKTeX/fonts/type1/public/lm/lmr17.pfb><C:/Users/User/AppDa
-ta/Local/Programs/MiKTeX/fonts/type1/public/lm/lmr8.pfb><C:/Users/User/AppData/
-Local/Programs/MiKTeX/fonts/type1/public/lm/lmri12.pfb><C:/Users/User/AppData/L
-ocal/Programs/MiKTeX/fonts/type1/public/lm/lmsy10.pfb><C:/Users/User/AppData/Lo
-cal/Programs/MiKTeX/fonts/type1/public/lm/lmsy6.pfb><C:/Users/User/AppData/Loca
-l/Programs/MiKTeX/fonts/type1/public/lm/lmsy8.pfb><C:/Users/User/AppData/Local/
-Programs/MiKTeX/fonts/type1/public/lm/lmtt12.pfb><C:/Users/User/AppData/Local/P
-rograms/MiKTeX/fonts/type1/public/amsfonts/symbols/msbm10.pfb>
-Output written on fairness.pdf (8 pages, 250335 bytes).
+ta/Local/Programs/MiKTeX/fonts/type1/public/lm/lmri12.pfb><C:/Users/User/AppDat
+a/Local/Programs/MiKTeX/fonts/type1/public/lm/lmsy10.pfb><C:/Users/User/AppData
+/Local/Programs/MiKTeX/fonts/type1/public/lm/lmsy6.pfb><C:/Users/User/AppData/L
+ocal/Programs/MiKTeX/fonts/type1/public/lm/lmtt12.pfb>
+Output written on fairness.pdf (6 pages, 190228 bytes).
 PDF statistics:
- 263 PDF objects out of 1000 (max. 8388607)
+ 165 PDF objects out of 1000 (max. 8388607)
  28 named destinations out of 1000 (max. 500000)
- 67 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 65 words of extra memory for PDF output out of 10000 (max. 10000000)
 

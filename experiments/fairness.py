@@ -16,7 +16,6 @@ def run_fairness_audit(
     positive_label: Any | None = None,
     reference_groups: Mapping[str, Any] | None = None,
     accepted_mask: Any | None = None,
-    num_bins: int = 10,
     small_group_warning_threshold: int | None = 30,
     metadata: Mapping[str, Any] | None = None,
     output_path: Path | None = None,
@@ -30,7 +29,6 @@ def run_fairness_audit(
         positive_label=positive_label,
         reference_groups=reference_groups,
         accepted_mask=accepted_mask,
-        num_bins=num_bins,
         small_group_warning_threshold=small_group_warning_threshold,
         metadata=metadata,
     )

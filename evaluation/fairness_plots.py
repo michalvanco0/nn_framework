@@ -42,7 +42,6 @@ def save_group_metric_panels(
             [
                 ("brier_score", "Brier score", "Brier score", None),
                 ("log_loss", "Log loss", "Log loss", None),
-                ("top_label_ece", "Top-label ECE", "Top-label ECE", (0.0, 1.0)),
             ]
         )
 
@@ -158,3 +157,109 @@ def save_binary_roc_curve(
     fig.tight_layout()
     paths = _save_figure_formats(fig, Path(output_stem))
     return roc_auc, paths
+
+
+def save_group_roc_curve_comparisons(
+    y_true: Any,
+    group_values: Any,
+    probabilities: Any,
+    class_labels: Any,
+    output_stem: Path,
+    positive_label: Any | None = None,
+) -> dict[str, dict[str, Path]]:
+    """Save one-vs-rest ROC comparisons for groups where both outcomes exist."""
+    true_values = np.asarray(y_true, dtype=object)
+    groups = np.asarray(group_values, dtype=object)
+    scores = np.asarray(probabilities, dtype=float)
+    labels = list(class_labels)
+
+    if true_values.ndim != 1 or groups.ndim != 1:
+        raise ValueError("y_true and group_values must be one-dimensional")
+    if len(true_values) != len(groups):
+        raise ValueError("y_true and group_values must contain the same samples")
+    if scores.ndim == 1:
+        if len(labels) != 2 or positive_label is None:
+            raise ValueError(
+                "One-dimensional probabilities require a binary task and positive_label"
+            )
+        positive_index = labels.index(positive_label)
+        expanded = np.empty((len(scores), 2), dtype=float)
+        expanded[:, positive_index] = scores
+        expanded[:, 1 - positive_index] = 1.0 - scores
+        scores = expanded
+    if scores.shape != (len(true_values), len(labels)):
+        raise ValueError(
+            "probabilities must have one row per sample and one column per class label"
+        )
+
+    unique_groups = []
+    seen_groups = set()
+    for value in groups:
+        if value is None or (
+            isinstance(value, (float, np.floating)) and np.isnan(value)
+        ):
+            continue
+        if value not in seen_groups:
+            seen_groups.add(value)
+            unique_groups.append(value)
+
+    saved_paths: dict[str, dict[str, Path]] = {}
+    for class_index, class_label in enumerate(labels):
+        group_curves = []
+        for group in unique_groups:
+            group_mask = groups == group
+            binary_truth = (true_values[group_mask] == class_label).astype(int)
+            if len(np.unique(binary_truth)) < 2:
+                continue
+            false_positive_rate, true_positive_rate, _ = roc_curve(
+                binary_truth,
+                scores[group_mask, class_index],
+            )
+            group_auc = float(auc(false_positive_rate, true_positive_rate))
+            group_curves.append(
+                (
+                    str(group),
+                    int(np.sum(group_mask)),
+                    false_positive_rate,
+                    true_positive_rate,
+                    group_auc,
+                )
+            )
+
+        if len(group_curves) < 2:
+            continue
+
+        fig, axis = plt.subplots(figsize=(8, 7))
+        axis.plot(
+            [0, 1],
+            [0, 1],
+            linestyle="--",
+            color="#666666",
+            linewidth=1.3,
+            label="Chance",
+        )
+        colors = plt.get_cmap("tab10").colors
+        for index, (group, count, fpr, tpr, group_auc) in enumerate(group_curves):
+            axis.plot(
+                fpr,
+                tpr,
+                linewidth=2.2,
+                color=colors[index % len(colors)],
+                label=f"{group} (n={count}, AUC={group_auc:.3f})",
+            )
+        axis.set(
+            xlim=(0.0, 1.0),
+            ylim=(0.0, 1.02),
+            xlabel="False positive rate",
+            ylabel="True positive rate",
+            title=f"Group-conditional ROC: {class_label} vs. rest",
+        )
+        axis.grid(True, alpha=0.25)
+        axis.legend(loc="lower right")
+        fig.tight_layout()
+        class_stem = output_stem.with_name(
+            f"{output_stem.name}_class_{class_index + 1}"
+        )
+        saved_paths[str(class_label)] = _save_figure_formats(fig, class_stem)
+
+    return saved_paths
