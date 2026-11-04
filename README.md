@@ -4,21 +4,24 @@ NN Reliability Framework is a Python research project baseline for systematicall
 
 ## Current scope (baseline)
 
-This repository currently provides a clean, reproducible baseline experiment:
+The repository contains both a CIFAR-10 image baseline and a reusable
+classification and fairness workflow:
 
 - CIFAR-10 dataset loading with `torchvision`
 - ResNet-18 training (adapted to 10 classes)
+- Tabular MLP training on UCI Adult or a user supplied CSV
+- Shared evaluation for classifiers that return class logits
+- Tabular accuracy, balanced accuracy, calibration, uncertainty, and group fairness reports
 - Evaluation with accuracy, precision, recall, F1 score, and confusion matrix
 - Model- and dataset-independent group fairness audit for classifier outputs
-- Saved model checkpoint
-- Saved structured JSON metrics
-- Saved confusion matrix plot
+- Saved checkpoints, structured JSON metrics, predictions, and plots
 
 ## Technology
 
 - Python 3.11+
 - PyTorch
 - torchvision
+- pandas
 - NumPy
 - scikit-learn
 - matplotlib
@@ -50,6 +53,121 @@ Outputs are written to the configured results directory (default: `results/`):
 - `resnet18_cifar10.pt` — model checkpoint
 - `baseline_metrics.json` — structured evaluation metrics
 - `confusion_matrix.png` — confusion matrix visualization
+
+## Tabular datasets and fairness
+
+### Why Adult for the first experiment
+
+The UCI Adult (Census Income) dataset is a practical first replacement for
+CIFAR-10 in a fairness experiment. Its target is whether recorded annual income
+is above $50,000, and it includes sex, race, and age, so group membership comes
+from the data rather than being guessed from the class label. UCI lists 48,842
+records, 14 input attributes, and missing values; the records were extracted
+from 1994 Census data. [UCI Adult dataset](https://archive.ics.uci.edu/dataset/2/adult)
+For a thesis, cite Becker and Kohavi (1996), DOI
+[10.24432/C5XW20](https://doi.org/10.24432/C5XW20); UCI lists the dataset under
+CC BY 4.0.
+
+Adult is a well known, small benchmark with a supplied train/test split, which
+makes the first end-to-end implementation easy to reproduce. It is not the
+strongest choice for claims about today's population. Ding et al. document
+limitations of Adult and introduce newer census-based tasks; Folktables' ACS
+Income task is one possible follow-up for studying years and geographic
+variation. That data is larger and needs an explicit state/year sampling
+design, so this project starts with Adult and keeps the trainer open to other
+CSV files. [Ding et al., *Retiring Adult*](https://papers.neurips.cc/paper_files/paper/2021/hash/32e54441e6382a7fbacbbbaf3c450059-Abstract.html),
+[Folktables](https://github.com/socialfoundations/folktables)
+
+The Adult run uses the official test split and draws validation data only from
+the official training split. It bins age into 17-29, 30-39, 40-49, 50-59, and
+60+ groups. By default, the model does not receive sex, race, raw age, or the
+survey weight (`fnlwgt`) as input features; the audit still compares model
+outcomes across sex, race, and age groups. This is a documented baseline
+choice, not a fairness intervention. Results remain specific to this dataset
+and model, and differences do not explain their cause.
+
+### Train and audit Adult
+
+The script downloads the official UCI archive into `data/` the first time it
+runs. It trains a tabular MLP, selects the checkpoint with the best validation
+accuracy, then evaluates the held-out test set. It writes model and preprocessing
+checkpoints, metrics, predictions, fairness and calibration JSON, and plots to
+`results/adult_income/`.
+
+```bash
+python -m experiments.tabular_baseline --dataset adult --epochs 30 --batch-size 256 --learning-rate 0.001 --seed 42
+```
+
+### Run it in Google Colab
+
+The clone cell reads GitHub, so push the repository version containing these
+changes before running it. Otherwise, upload a project archive with the new
+files to Colab and change into its extracted folder. Select a GPU runtime if
+you want GPU training, then run these cells:
+
+```python
+%cd /content
+!git clone https://github.com/michalvanco0/nn_framework.git
+%cd /content/nn_framework
+!pip install -r requirements.txt
+```
+
+```python
+!python -m experiments.tabular_baseline \
+  --dataset adult \
+  --epochs 30 \
+  --batch-size 256 \
+  --learning-rate 0.001 \
+  --seed 42 \
+  --output-dir results/adult_income
+```
+
+The dataset and artifacts are initially in the Colab VM. To keep results after
+the session ends, mount Drive at any time during the session and copy the output
+folder there:
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+```
+
+```python
+!cp -r results/adult_income /content/drive/MyDrive/adult_income_results
+```
+
+Artifacts include `tabular_mlp.pt`, `preprocessor.joblib`, `metrics.json`,
+`fairness.json`, `calibration.json`, `uncertainty.json`, `predictions.csv`, a
+confusion matrix, and group comparison charts. The saved predictions can also
+be audited independently with `experiments.fairness_csv`.
+
+### Use another tabular classification dataset
+
+Pass one CSV containing the target, input features, and any categorical group
+columns. Numeric and categorical features are inferred from the CSV, missing
+input values are imputed, and scaling/encoding is fitted on training rows only.
+The default split is stratified 70% train, 15% validation, and 15% test. Group
+columns are omitted from model inputs by default, but can be included explicitly
+with `--include-sensitive-features`. If the CSV already has a split column with
+`train`, `validation`/`val`, and `test` values, pass it with `--split-column`;
+when the column has only `train` and `test`, validation is drawn from train.
+
+```bash
+python -m experiments.tabular_baseline \
+  --csv data/my_dataset.csv \
+  --target-column outcome \
+  --sensitive-columns sex age_band \
+  --drop-columns person_id age \
+  --positive-label yes \
+  --epochs 30 \
+  --output-dir results/my_dataset
+```
+
+The CSV must have one row per example and one column per value. Convert a
+continuous group attribute such as age into documented categories before
+passing it as a sensitive column. Regression and ranking are not supported by
+this classification trainer. The standalone fairness functions and prediction
+CSV audit remain usable with outputs from other model architectures and
+frameworks.
 
 ## Fairness audit
 
@@ -191,14 +309,11 @@ current interface.
 - Gardner, Brooks, and Baker (2019), [Evaluating the Fairness of Predictive
   Student Models Through Slicing Analysis](https://doi.org/10.1145/3303772.3303791).
 
-## Planned future modules (not implemented yet)
+## Current limitations and next steps
 
-- Robustness analysis
-- Calibration analysis
-- Uncertainty estimation
-- Explainability/XAI
-- Distribution shift analysis
-- Final reliability score
-- VizWiz evaluation
-- Adversarial attacks
-- Automated final report generation
+- The generic trainer currently supports supervised classification on tabular CSVs.
+- The detailed robustness and explainability workflows are still image/CIFAR-specific.
+- Regression, ranking, confidence intervals, significance tests, and causal or
+  counterfactual fairness need separate task-specific implementations.
+- ACSIncome or another dataset from a different population is a useful next
+  dataset for evaluating subgroup differences beyond Adult.

@@ -174,13 +174,16 @@ def run_fairness_csv_audit(
     chart_paths = {}
     roc_chart_paths = {}
     for index, attribute_name in enumerate(group_columns):
-        chart_paths[attribute_name] = save_group_metric_panels(
-            report,
-            sensitive_attribute=attribute_name,
-            output_stem=output_path.with_name(
-                f"{output_path.stem}_group_{index + 1}_metrics"
-            ),
-        )
+        if report["attributes"][attribute_name]["group_metrics"]:
+            chart_paths[attribute_name] = save_group_metric_panels(
+                report,
+                sensitive_attribute=attribute_name,
+                output_stem=output_path.with_name(
+                    f"{output_path.stem}_group_{index + 1}_metrics"
+                ),
+            )
+        else:
+            chart_paths[attribute_name] = {}
         if probabilities is not None:
             roc_chart_paths[attribute_name] = save_group_roc_curve_comparisons(
                 y_true=y_true,
@@ -227,7 +230,10 @@ def run_fairness_csv_audit(
         gap = attribute["across_group_gaps"]["accuracy"]["max_minus_min"]
         if gap is not None:
             print(f"  accuracy range (max - min): {gap:.4f} ({gap * 100:.2f} pp)")
-        print(f"  chart: {chart_paths[attribute_name]['png']}")
+        if "png" in chart_paths[attribute_name]:
+            print(f"  chart: {chart_paths[attribute_name]['png']}")
+        else:
+            print("  chart: skipped because the attribute has no observed groups")
         for class_label, paths in roc_chart_paths.get(attribute_name, {}).items():
             print(f"  ROC comparison for {class_label}: {paths['png']}")
     print(f"Detailed report: {output_path}")

@@ -1,5 +1,6 @@
 from pathlib import Path
-from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch, Rectangle
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -131,9 +132,12 @@ def calculate_ace(
 def save_classwise_reliability_diagram(
     classwise_bins,
     output_path: Path,
+    class_names=None,
 ):
     if not classwise_bins:
         return
+    if class_names is not None and len(class_names) != len(classwise_bins):
+        raise ValueError("class_names must match the number of classes")
 
     fig, ax = plt.subplots(figsize=(12, 8))
     ax.plot(
@@ -147,7 +151,13 @@ def save_classwise_reliability_diagram(
     colors = plt.get_cmap("tab10")
     for class_result in classwise_bins:
         bins = class_result["bins"]
-        color = colors(class_result["class_index"] % 10)
+        class_index = class_result["class_index"]
+        color = colors(class_index % 10)
+        class_label = (
+            class_names[class_index]
+            if class_names is not None
+            else f"Class {class_index}"
+        )
         ax.plot(
             [item["confidence"] for item in bins],
             [item["accuracy"] for item in bins],
@@ -155,10 +165,7 @@ def save_classwise_reliability_diagram(
             markersize=3.5,
             linewidth=1.2,
             color=color,
-            label=(
-                f"Class {class_result['class_index']} "
-                f"(ACE={class_result['ace']:.3f})"
-            ),
+            label=f"{class_label} (ACE={class_result['ace']:.3f})",
         )
 
     ax.set_xlabel("Mean class probability")
@@ -248,21 +255,16 @@ def _save_bin_gap_diagram(
         return
 
     fig, ax = plt.subplots(figsize=(10, 6) if adaptive else (7.5, 6))
+    bins = list(bins)
     non_empty_bins = [item for item in bins if item["count"] > 0]
-    accuracies = np.asarray(
-        [item["accuracy"] if item["count"] > 0 else 0 for item in bins],
-        dtype=float,
-    )
-    confidences = np.asarray(
-        [
-            item["confidence"] if item["count"] > 0 else np.nan
-            for item in bins
-        ],
-        dtype=float,
-    )
+    if not non_empty_bins:
+        plt.close(fig)
+        return
 
     if adaptive:
-        positions = np.arange(len(bins))
+        accuracies = np.asarray([item["accuracy"] for item in non_empty_bins])
+        confidences = np.asarray([item["confidence"] for item in non_empty_bins])
+        positions = np.arange(len(non_empty_bins))
         width = 0.76
         tick_labels = [
             f"{index + 1}\n({confidence:.1e})"
@@ -270,7 +272,7 @@ def _save_bin_gap_diagram(
         ]
         ax.set_xticks(positions, tick_labels, fontsize=8)
         ax.set_xlabel("Adaptive bin index (mean class probability in parentheses)")
-        ax.set_xlim(-0.6, len(bins) - 0.4)
+        ax.set_xlim(-0.6, len(non_empty_bins) - 0.4)
         ax.scatter(
             positions,
             confidences,
@@ -282,14 +284,27 @@ def _save_bin_gap_diagram(
             zorder=4,
         )
     else:
-        bin_lowers = np.asarray([item["lower"] for item in bins], dtype=float)
-        bin_uppers = np.asarray([item["upper"] for item in bins], dtype=float)
+        bin_lowers = np.asarray([item["lower"] for item in bins])
+        bin_uppers = np.asarray([item["upper"] for item in bins])
         bin_widths = bin_uppers - bin_lowers
-        positions = (bin_lowers + bin_uppers) / 2
+        bin_centers = (bin_lowers + bin_uppers) / 2
+        positions = bin_centers
         width = bin_widths * 0.9
-        ax.set_xlabel("Mean top-label confidence")
+        ax.set_xlabel("Top-label confidence bin")
         ax.set_xlim(0, 1)
         ax.set_xticks(np.linspace(0, 1, 6))
+        for index, item in enumerate(bins):
+            if item["count"] == 0:
+                ax.bar(
+                    bin_centers[index],
+                    1.0,
+                    width=width[index],
+                    color="#F0F0F0",
+                    edgecolor="#888888",
+                    linewidth=0.7,
+                    hatch="///",
+                    zorder=0,
+                )
         ax.plot(
             [0, 1],
             [0, 1],
@@ -299,46 +314,45 @@ def _save_bin_gap_diagram(
             label="Perfect calibration",
             zorder=1,
         )
-        ax.scatter(
-            [item["confidence"] for item in non_empty_bins],
-            np.zeros(len(non_empty_bins)),
-            marker="|",
-            s=90,
-            color="black",
-            linewidths=1.2,
-            label="Mean top-label confidence",
-            zorder=4,
-        )
 
-    bars = ax.bar(
-        positions,
+    if adaptive:
+        accuracies = np.asarray([item["accuracy"] for item in non_empty_bins])
+        confidences = np.asarray([item["confidence"] for item in non_empty_bins])
+        plot_bins = non_empty_bins
+        plot_positions = positions
+        plot_widths = np.full(len(plot_bins), width)
+    else:
+        plot_bins = [item for item in bins if item["count"] > 0]
+        plot_positions = np.asarray(
+            [(item["lower"] + item["upper"]) / 2 for item in plot_bins]
+        )
+        plot_widths = np.asarray(
+            [(item["upper"] - item["lower"]) * 0.9 for item in plot_bins]
+        )
+        accuracies = np.asarray([item["accuracy"] for item in plot_bins])
+        confidences = np.asarray([item["confidence"] for item in plot_bins])
+
+    ax.bar(
+        plot_positions,
         accuracies,
-        width=width,
+        width=plot_widths,
         color="#2457D6",
         edgecolor="black",
         linewidth=0.6,
-        label="Bin accuracy",
         zorder=2,
     )
-    for index, bar in enumerate(bars):
-        if bins[index]["count"] == 0:
-            bar.set_facecolor("#D9D9D9")
-            bar.set_hatch("//")
-            bar.set_label("Empty bin" if index == 0 else "_nolegend_")
-            continue
-        position = positions[index]
-        accuracy = accuracies[index]
-        confidence = confidences[index]
+    for position, bar_width, accuracy, confidence in zip(
+        plot_positions, plot_widths, accuracies, confidences
+    ):
         ax.bar(
             position,
             abs(accuracy - confidence),
             bottom=min(accuracy, confidence),
-            width=width,
+            width=bar_width,
             color="#F3A0A0",
             edgecolor="#D62728",
             linewidth=0.7,
             hatch="///",
-            label="Calibration gap" if index == 0 else "_nolegend_",
             zorder=3,
         )
 
@@ -357,11 +371,46 @@ def _save_bin_gap_diagram(
         bbox={"facecolor": "white", "edgecolor": "0.4", "alpha": 0.95},
     )
     ax.set_ylim(0, 1.05)
-    ax.set_ylabel("Accuracy / class frequency")
+    ax.set_ylabel(
+        "Empirical class frequency" if adaptive else "Top-label accuracy"
+    )
     ax.set_title(title)
     ax.grid(axis="y", linestyle=":", alpha=0.55)
     ax.set_axisbelow(True)
-    ax.legend(loc="upper left", bbox_to_anchor=(0, 0.88), fontsize="small")
+    if adaptive:
+        legend_handles = [
+            Line2D(
+                [], [], color="black", marker="_", linestyle="None",
+                markersize=12, label="Mean class probability"
+            ),
+            Patch(facecolor="#2457D6", edgecolor="black", label="Bin accuracy"),
+            Patch(
+                facecolor="#F3A0A0", edgecolor="#D62728", hatch="///",
+                label="Calibration gap"
+            ),
+        ]
+    else:
+        legend_handles = [
+            Line2D(
+                [], [], color="0.35", linestyle="--",
+                label="Perfect calibration"
+            ),
+            Patch(facecolor="#2457D6", edgecolor="black", label="Bin accuracy"),
+            Patch(
+                facecolor="#F3A0A0", edgecolor="#D62728", hatch="///",
+                label="Calibration gap"
+            ),
+            Patch(
+                facecolor="#F0F0F0", edgecolor="#888888", hatch="///",
+                label="No samples"
+            ),
+        ]
+    ax.legend(
+        handles=legend_handles,
+        loc="upper left",
+        bbox_to_anchor=(0, 0.88),
+        fontsize="small",
+    )
 
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,7 +428,7 @@ def save_ece_reliability_diagram(
         metric_value=ece,
         metric_label="ECE",
         output_path=output_path,
-        title="Top-label ECE Reliability Diagram — CIFAR-10 ResNet-18",
+        title="Top-label ECE Reliability Diagram",
         adaptive=False,
     )
 

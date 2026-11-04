@@ -173,6 +173,7 @@ def run_calibration(
     save_classwise_reliability_diagram(
         classwise_bins=classwise_bins,
         output_path=diagram_path,
+        class_names=class_names,
     )
     save_ece_reliability_diagram(
         bins=top_label_ece_bins,
@@ -188,6 +189,7 @@ def run_calibration(
     result = {
         "model": "ResNet18",
         "dataset": "CIFAR10",
+        "class_names": list(class_names),
         "metric": "ACE",
         "ace": ace,
         "top_label_ece": top_label_ece,
