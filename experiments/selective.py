@@ -1,13 +1,8 @@
-"""Selective prediction / abstention experiment."""
-
 from __future__ import annotations
-
 import json
 from pathlib import Path
-
 import matplotlib.pyplot as plt
 import torch
-
 from datasets.cifar10 import get_cifar10_dataloaders
 from evaluation.evaluator import evaluate
 from evaluation.selective import calculate_risk_coverage_curve

@@ -12,6 +12,7 @@ classification and fairness workflow:
 - Tabular MLP training on UCI Adult or a user supplied CSV
 - Shared evaluation for classifiers that return class logits
 - Tabular accuracy, balanced accuracy, calibration, uncertainty, and group fairness reports
+- Global permutation importance to interpret the effect of each input on held-out metrics
 - Evaluation with accuracy, precision, recall, F1 score, and confusion matrix
 - Model- and dataset-independent group fairness audit for classifier outputs
 - Saved checkpoints, structured JSON metrics, predictions, and plots
@@ -79,20 +80,30 @@ CSV files. [Ding et al., *Retiring Adult*](https://papers.neurips.cc/paper_files
 [Folktables](https://github.com/socialfoundations/folktables)
 
 The Adult run uses the official test split and draws validation data only from
-the official training split. It bins age into 17-29, 30-39, 40-49, 50-59, and
-60+ groups. By default, the model does not receive sex, race, raw age, or the
-survey weight (`fnlwgt`) as input features; the audit still compares model
-outcomes across sex, race, and age groups. This is a documented baseline
-choice, not a fairness intervention. Results remain specific to this dataset
-and model, and differences do not explain their cause.
+the official training split. It uses all 14 original input attributes,
+including age, race, sex, and `fnlwgt`. Age bands (17-29, 30-39, 40-49, 50-59,
+60+) are created only for the group audit; the extra derived column is not fed
+into the model. Full analysis audits every model input attribute and every
+two-attribute intersection by default, including age bands. This is a search
+for uneven model error across feature-defined groups; the framework does not
+label any feature as sensitive or infer that a measured difference is ethnic
+discrimination.
 
-### Train and audit Adult
+### Train Adult baseline
 
 The script downloads the official UCI archive into `data/` the first time it
-runs. It trains a tabular MLP, selects the checkpoint with the best validation
-accuracy, then evaluates the held-out test set. It writes model and preprocessing
-checkpoints, metrics, predictions, fairness and calibration JSON, and plots to
-`results/adult_income/`.
+runs. For the current standalone training phase, use `--basic-only`: it trains
+on all 14 original Adult inputs, selects a checkpoint by validation accuracy,
+and reports ordinary test classification metrics. It does not run a group
+fairness audit, calibration/uncertainty analysis, or feature interpretation.
+
+```bash
+python -m experiments.tabular_baseline --dataset adult --basic-only --epochs 30 --batch-size 256 --learning-rate 0.001 --seed 42 --output-dir results/adult_income_basic
+```
+
+This writes the model checkpoint, fitted preprocessing pipeline, `metrics.json`,
+`predictions.csv`, and a confusion matrix. The full analysis mode remains
+available by omitting `--basic-only` and can be used in a later step.
 
 ```bash
 python -m experiments.tabular_baseline --dataset adult --epochs 30 --batch-size 256 --learning-rate 0.001 --seed 42
@@ -115,6 +126,7 @@ you want GPU training, then run these cells:
 ```python
 !python -m experiments.tabular_baseline \
   --dataset adult \
+  --basic-only \
   --epochs 30 \
   --batch-size 256 \
   --learning-rate 0.001 \
@@ -135,19 +147,26 @@ drive.mount('/content/drive')
 !cp -r results/adult_income /content/drive/MyDrive/adult_income_results
 ```
 
-Artifacts include `tabular_mlp.pt`, `preprocessor.joblib`, `metrics.json`,
-`fairness.json`, `calibration.json`, `uncertainty.json`, `predictions.csv`, a
-confusion matrix, and group comparison charts. The saved predictions can also
-be audited independently with `experiments.fairness_csv`.
+In basic-only mode, artifacts include `tabular_mlp.pt`, `preprocessor.joblib`,
+`metrics.json`, `predictions.csv`, and `confusion_matrix.png`. The saved
+predictions can be used for a later audit. Full analysis mode additionally
+writes `fairness.json`, calibration and uncertainty reports, permutation
+importance, and group comparison charts.
+
+Permutation importance shuffles one input at a time on the held-out test rows
+and reports changes in accuracy, balanced accuracy, and log loss. A positive
+balanced-accuracy decrease means performance fell after shuffling that input.
+This describes the trained model's predictive reliance; it does not estimate a
+causal effect, and correlated features can share or mask importance.
 
 ### Use another tabular classification dataset
 
-Pass one CSV containing the target, input features, and any categorical group
-columns. Numeric and categorical features are inferred from the CSV, missing
-input values are imputed, and scaling/encoding is fitted on training rows only.
-The default split is stratified 70% train, 15% validation, and 15% test. Group
-columns are omitted from model inputs by default, but can be included explicitly
-with `--include-sensitive-features`. If the CSV already has a split column with
+Pass one CSV containing the target and input features. Numeric and categorical
+features are inferred from the CSV, missing input values are imputed, and
+scaling/encoding is fitted on training rows only.
+The default split is stratified 70% train, 15% validation, and 15% test. Every
+column except the target and explicit exclusions is used as a model input,
+including the audited feature columns. If the CSV already has a split column with
 `train`, `validation`/`val`, and `test` values, pass it with `--split-column`;
 when the column has only `train` and `test`, validation is drawn from train.
 
@@ -155,25 +174,26 @@ when the column has only `train` and `test`, validation is drawn from train.
 python -m experiments.tabular_baseline \
   --csv data/my_dataset.csv \
   --target-column outcome \
-  --sensitive-columns sex age_band \
-  --drop-columns person_id age \
+  --drop-columns person_id \
   --positive-label yes \
   --epochs 30 \
   --output-dir results/my_dataset
 ```
 
-The CSV must have one row per example and one column per value. Convert a
-continuous group attribute such as age into documented categories before
-passing it as a sensitive column. Regression and ranking are not supported by
-this classification trainer. The standalone fairness functions and prediction
-CSV audit remain usable with outputs from other model architectures and
-frameworks.
+The CSV must have one row per example and one column per value. Full analysis
+audits all model input columns by default. Numeric features are split into up
+to five quantile bins using cut points learned from training rows. Features with
+many categorical levels retain their most frequent levels and group the rest
+as `other`. Every pair of audit features is also evaluated as an intersection.
+Use `--audit-columns` to choose a smaller set when needed; `--sensitive-columns`
+remains as an alias. Regression and ranking are not supported by this
+classification trainer.
 
 ## Fairness audit
 
 `evaluation.fairness.calculate_fairness_metrics` measures classifier performance
 across caller-supplied groups. It only needs aligned ground-truth labels,
-predicted labels, and one or more sensitive/group attributes. It does not load a
+predicted labels, and one or more feature groups. It does not load a
 particular dataset, depend on a model architecture, change model predictions,
 or assign a fair/unfair verdict. The same interface can be used with image,
 text, tabular, or other classification models once their predictions and group
@@ -187,7 +207,7 @@ from experiments.fairness import run_fairness_audit
 report = run_fairness_audit(
     y_true=labels,
     y_pred=predictions,
-    sensitive_features={
+    audit_features={
         "age_band": age_bands,
         "region": regions,
     },
@@ -199,19 +219,24 @@ report = run_fairness_audit(
 ```
 
 For a console workflow independent of the model framework, export one CSV row
-per evaluated example. Keep labels, predictions, group attributes, and optional
-probability columns on the same row:
+per evaluated example. Keep labels, predictions, feature values, and optional
+probability columns on the same row. By default, the adapter uses every other
+column as an audit feature and creates pairwise intersections; pass
+`--group-columns` only when you want to limit the audit:
 
 ```powershell
-.\.venv\Scripts\python.exe -m experiments.fairness_csv --input predictions.csv --label-column y_true --prediction-column y_pred --group-columns sex age_band --class-labels no yes --probability-columns p_no p_yes --reference-group sex=female --model-name my-model --dataset-name my-dataset --split-name test --output results/fairness.json
+.\.venv\Scripts\python.exe -m experiments.fairness_csv --input predictions.csv --label-column y_true --prediction-column y_pred --class-labels no yes --positive-label yes --probability-columns p_no p_yes --model-name my-model --dataset-name my-dataset --split-name test --output results/fairness.json
 ```
 
 The class-label order must match the probability-column order. With no
 probabilities, probability-quality, ABROCA, and ROC-curve results are omitted.
 When scores are present, the adapter saves a separate group-conditional,
 one-versus-rest ROC comparison for each class that has both outcomes in at least
-two groups. This adapter reads predictions from any model; it does not load or
-modify the model.
+two groups. In this CSV-only workflow, numeric bins are derived from the rows
+being audited; the tabular training workflow instead learns cut points from its
+training partition. ABROCA comparisons are omitted for an attribute with more
+than 100 groups by default to keep pairwise curve comparisons bounded. This
+adapter reads predictions from any model; it does not load or modify the model.
 
 The generic function above works with predictions from any classification
 model. CIFAR-10 itself has no demographic or other supplied group attributes,
@@ -241,7 +266,8 @@ The report contains group-level values and between-group ranges for:
 - Per-class selection rate, true/false positive and negative rates, positive
   and negative predictive values, and F1.
 - Statistical parity/selection-rate gaps, equal-opportunity (TPR) gaps,
-  equalized-odds components (TPR and FPR gaps), and predictive-parity gaps.
+  equalized-odds components (TPR and FPR gaps), the maximum Equalized Odds
+  gap, and predictive-parity gaps.
 - When `reference_groups={"attribute": "group value"}` is explicitly supplied,
   signed statistical parity, equal-opportunity, FPR, predictive-parity, and
   negative-predictive-parity differences; disparate-impact ratios; and average
@@ -253,16 +279,17 @@ The report contains group-level values and between-group ranges for:
   among accepted predictions.
 
 For multiclass tasks, rate-based metrics are computed one class versus all
-others. Set `positive_label` to name the class of interest explicitly. For
+others. Set `positive_label` to rank on the class of interest; otherwise the
+ranking uses the largest Equalized Odds gap across classes. For
 two-dimensional probabilities, `class_labels` is required and must match the
 column order; it is also needed when the evaluation split omits a model output
 class. Binary probability vectors are also supported when `positive_label` is
-specified. No reference group is selected automatically. Group attributes should
-be categorical; bin continuous attributes such as age using an explicitly
-documented policy before passing them. Missing group values are counted and
-omitted from that attribute's comparisons; small group sizes are called out
-because their estimates can be unstable. For an intersectional audit, pass an
-additional composite categorical attribute such as `gender_age_band`.
+specified. No reference group is selected automatically. The tabular training
+workflow bins numeric features using training-partition quantiles, preserves
+categorical features, and automatically creates all pairwise feature
+intersections. Other callers can pass their own precomputed groups. Missing
+group values are counted and omitted from that attribute's comparisons; small
+group sizes are called out because their estimates can be unstable.
 
 When `accepted_mask` is supplied, classification rates and error metrics are
 conditional on accepted samples, while coverage uses all samples. Probability
@@ -276,17 +303,22 @@ calculate confidence intervals or significance tests. Calibration error is
 measured separately with ACE in the calibration module; the fairness report
 does not calculate ECE.
 
-There is deliberately no combined fairness score, threshold, or model ranking.
-The report makes observed group differences visible so that model suitability
-can be considered in the context of the intended use. The metrics do not
-establish why a difference exists or whether it is acceptable. CIFAR-10 does
+The report includes a descriptive disparity ranking. Its score is the largest
+Equalized Odds rate gap (the maximum of the TPR and FPR max-minus-min gaps),
+between 0 and 1; for example, 0.20 means a 20 percentage-point difference.
+The ranking is available in `fairness.json` and a flat `fairness_ranking.csv`.
+It helps locate where model errors differ most across the audited groups. It is
+not a probability of bias, a significance test, or a causal explanation, and
+small group sizes can make the estimate unstable. The metrics do not establish
+why a difference exists or whether it is acceptable. CIFAR-10 does
 not provide demographic group attributes, so its existing evaluation cannot
 produce demographic fairness results; differences among its object classes
 remain class-wise performance results.
-The report also lists dimensions not measured, including sensitive attributes
-not supplied to the audit, causal explanations, and individual or
-counterfactual fairness. The selected statistical criteria may disagree, so
-their measurements are kept separate.
+The report also lists dimensions not measured, including causal explanations
+and individual or counterfactual fairness. The selected statistical criteria
+may disagree, so their measurements are kept separate. Auditing all available
+features can surface systematic error patterns without claiming that any
+feature is a protected or sensitive attribute.
 
 This implementation covers supervised classification. Individual and
 counterfactual fairness require a task-specific similarity or causal model;

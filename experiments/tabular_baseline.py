@@ -1,7 +1,4 @@
-"""Train and evaluate a neural classifier on Adult or a user supplied CSV."""
-
 from __future__ import annotations
-
 import argparse
 import csv
 import json
@@ -9,7 +6,6 @@ import math
 import random
 from pathlib import Path
 from typing import Any
-
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,13 +14,12 @@ import torch
 from scipy import sparse
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import balanced_accuracy_score, confusion_matrix
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix, log_loss
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-
 from datasets.adult_income import load_adult_income
 from datasets.tabular import clean_features, load_tabular_csv, normalize_target
 from evaluation.calibration import calculate_ace, calculate_ece
@@ -35,7 +30,11 @@ from evaluation.fairness_plots import (
 )
 from evaluation.performance import calculate_classification_metrics
 from evaluation.uncertainty import calculate_confidence_statistics
-from experiments.fairness import run_fairness_audit
+from experiments.fairness import (
+    build_feature_audit_groups,
+    run_fairness_audit,
+    write_disparity_ranking,
+)
 from models.tabular_mlp import TabularMLP
 
 
@@ -295,15 +294,146 @@ def _write_predictions(
             writer.writerow(row)
 
 
+def _save_permutation_importance(
+    importance: list[dict[str, Any]],
+    output_path: Path,
+) -> None:
+    if not importance:
+        return
+    ordered = sorted(
+        importance,
+        key=lambda item: item["balanced_accuracy_decrease_mean"],
+    )
+    names = [item["feature"] for item in ordered]
+    means = [item["balanced_accuracy_decrease_mean"] for item in ordered]
+    deviations = [item["balanced_accuracy_decrease_std"] for item in ordered]
+    figure_height = max(5.0, 0.34 * len(ordered))
+    figure, axis = plt.subplots(figsize=(10, figure_height))
+    positions = np.arange(len(ordered))
+    axis.barh(positions, means, xerr=deviations, color="#3274A1", alpha=0.9)
+    axis.axvline(0.0, color="#555555", linewidth=1.0)
+    axis.set_yticks(positions, names)
+    axis.set_xlabel("Decrease in balanced accuracy after shuffling")
+    axis.set_title("Global permutation importance")
+    axis.grid(axis="x", alpha=0.25)
+    axis.set_axisbelow(True)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(figure)
+
+
+def _calculate_permutation_importance(
+    model: nn.Module,
+    preprocessor: ColumnTransformer,
+    raw_test_features: pd.DataFrame,
+    y_true_indices: np.ndarray,
+    baseline_prediction: dict[str, list],
+    class_count: int,
+    *,
+    batch_size: int,
+    num_workers: int,
+    repeats: int,
+    seed: int,
+    device: torch.device,
+) -> list[dict[str, Any]]:
+    if repeats < 1:
+        raise ValueError("importance_repeats must be at least 1")
+
+    baseline_pred = np.asarray(baseline_prediction["y_pred"], dtype=np.int64)
+    baseline_probabilities = np.asarray(baseline_prediction["probabilities"], dtype=float)
+    baseline_accuracy = float(np.mean(y_true_indices == baseline_pred))
+    baseline_balanced_accuracy = float(
+        balanced_accuracy_score(y_true_indices, baseline_pred)
+    )
+    baseline_log_loss = float(
+        log_loss(
+            y_true_indices,
+            baseline_probabilities,
+            labels=np.arange(class_count),
+        )
+    )
+    random_generator = np.random.default_rng(seed)
+    importance: list[dict[str, Any]] = []
+
+    for feature_index, column in enumerate(raw_test_features.columns, start=1):
+        print(
+            f"Permutation importance {feature_index}/{len(raw_test_features.columns)}: {column}"
+        )
+        accuracy_decreases = []
+        balanced_accuracy_decreases = []
+        log_loss_increases = []
+        original_values = raw_test_features[column].to_numpy(copy=True)
+
+        for _ in range(repeats):
+            shuffled_features = raw_test_features.copy()
+            shuffled_features[column] = original_values[
+                random_generator.permutation(len(original_values))
+            ]
+            transformed = _to_float32(
+                preprocessor.transform(clean_features(shuffled_features))
+            )
+            shuffled_loader = _make_loader(
+                transformed,
+                y_true_indices,
+                batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+            )
+            shuffled_prediction = evaluate(model, shuffled_loader, device)
+            shuffled_pred = np.asarray(shuffled_prediction["y_pred"], dtype=np.int64)
+            shuffled_probabilities = np.asarray(
+                shuffled_prediction["probabilities"], dtype=float
+            )
+            accuracy_decreases.append(
+                baseline_accuracy - float(np.mean(y_true_indices == shuffled_pred))
+            )
+            balanced_accuracy_decreases.append(
+                baseline_balanced_accuracy
+                - float(balanced_accuracy_score(y_true_indices, shuffled_pred))
+            )
+            log_loss_increases.append(
+                float(
+                    log_loss(
+                        y_true_indices,
+                        shuffled_probabilities,
+                        labels=np.arange(class_count),
+                    )
+                    - baseline_log_loss
+                )
+            )
+
+        importance.append(
+            {
+                "feature": str(column),
+                "accuracy_decrease_mean": float(np.mean(accuracy_decreases)),
+                "accuracy_decrease_std": float(np.std(accuracy_decreases)),
+                "balanced_accuracy_decrease_mean": float(
+                    np.mean(balanced_accuracy_decreases)
+                ),
+                "balanced_accuracy_decrease_std": float(
+                    np.std(balanced_accuracy_decreases)
+                ),
+                "log_loss_increase_mean": float(np.mean(log_loss_increases)),
+                "log_loss_increase_std": float(np.std(log_loss_increases)),
+                "repeats": repeats,
+            }
+        )
+    return sorted(
+        importance,
+        key=lambda item: item["balanced_accuracy_decrease_mean"],
+        reverse=True,
+    )
+
+
 def run_tabular_baseline(
     *,
     dataset: str | None = None,
     csv_path: Path | None = None,
     target_column: str | None = None,
+    audit_columns: list[str] | None = None,
     sensitive_columns: list[str] | None = None,
     drop_columns: list[str] | None = None,
     split_column: str | None = None,
-    include_sensitive_features: bool = False,
     positive_label: str | None = None,
     data_dir: Path = Path("data"),
     output_dir: Path = Path("results/tabular"),
@@ -311,24 +441,30 @@ def run_tabular_baseline(
     batch_size: int = 256,
     learning_rate: float = 0.001,
     num_workers: int = 0,
+    importance_repeats: int = 5,
+    basic_only: bool = False,
     seed: int = 42,
 ) -> dict[str, Any]:
     if (dataset == "adult") == (csv_path is not None):
         raise ValueError("Choose exactly one input: --dataset adult or --csv FILE")
-    if epochs < 1 or batch_size < 1 or learning_rate <= 0:
-        raise ValueError("epochs, batch_size, and learning_rate must be positive")
+    if epochs < 1 or batch_size < 1 or learning_rate <= 0 or importance_repeats < 1:
+        raise ValueError(
+            "epochs, batch_size, learning_rate, and importance_repeats must be positive"
+        )
     _set_seed(seed)
+    if audit_columns is not None and sensitive_columns is not None:
+        raise ValueError("Pass audit_columns or sensitive_columns, not both")
+    requested_audit_columns = (
+        audit_columns if audit_columns is not None else sensitive_columns
+    )
 
     if dataset == "adult":
         if split_column is not None:
             raise ValueError("Adult already supplies an official split; omit --split-column")
         train_frame, test_frame = load_adult_income(data_dir)
         target_column = "income"
-        if sensitive_columns is None:
-            sensitive_columns = ["sex", "race", "age_band"]
-        # Age is audited in bands; fnlwgt is survey-weight metadata rather than
-        # an ordinary person-level predictor.
-        drop_columns = list(drop_columns or []) + ["age", "fnlwgt"]
+        # age_band is available as an additional audit feature; all original
+        # Adult attributes remain model inputs by default.
         frame = pd.concat([train_frame, test_frame], ignore_index=True)
         official_train_count = len(train_frame)
         dataset_name = "UCI Adult (Census Income)"
@@ -341,26 +477,16 @@ def run_tabular_baseline(
         frame = normalize_target(frame, target_column)
         official_train_count = None
         dataset_name = csv_path.stem
-        sensitive_columns = list(sensitive_columns or [])
         drop_columns = list(drop_columns or [])
     else:
         raise ValueError("Only the built-in 'adult' dataset or --csv is currently supported")
 
     assert target_column is not None
     frame = normalize_target(frame, target_column)
-    sensitive_columns = list(sensitive_columns or [])
     drop_columns = list(drop_columns or [])
-    if len(set(sensitive_columns)) != len(sensitive_columns):
-        raise ValueError("Sensitive column names must be unique")
-    missing_columns = [
-        column
-        for column in [*sensitive_columns, *drop_columns]
-        if column not in frame.columns
-    ]
+    missing_columns = [column for column in drop_columns if column not in frame.columns]
     if missing_columns:
-        raise ValueError(f"Dataset is missing requested columns: {missing_columns}")
-    if target_column in sensitive_columns:
-        raise ValueError("The target column cannot also be a sensitive group")
+        raise ValueError(f"Dataset is missing requested drop columns: {missing_columns}")
 
     class_labels = sorted(frame[target_column].astype(str).unique().tolist())
     if positive_label is not None and positive_label not in class_labels:
@@ -369,7 +495,6 @@ def run_tabular_baseline(
         )
     label_to_index = {label: index for index, label in enumerate(class_labels)}
     labels = frame[target_column].astype(str).map(label_to_index).to_numpy(dtype=np.int64)
-    group_frame = frame[sensitive_columns].copy()
     split_values = None
     if split_column is not None:
         if dataset == "adult":
@@ -379,13 +504,32 @@ def run_tabular_baseline(
         split_values = frame[split_column].to_numpy()
 
     excluded = {target_column, *drop_columns}
+    if dataset == "adult":
+        excluded.add("age_band")
     if split_column is not None:
         excluded.add(split_column)
-    if not include_sensitive_features:
-        excluded.update(sensitive_columns)
     feature_columns = [column for column in frame.columns if column not in excluded]
     if not feature_columns:
-        raise ValueError("No model features remain after excluding the target and groups")
+        raise ValueError("No model features remain after excluding the target and explicit drops")
+    if basic_only:
+        audit_columns = []
+    elif requested_audit_columns is None:
+        audit_columns = list(feature_columns)
+        if dataset == "adult" and "age_band" in frame.columns:
+            audit_columns.append("age_band")
+    else:
+        audit_columns = list(requested_audit_columns)
+    if len(set(audit_columns)) != len(audit_columns):
+        raise ValueError("Audit column names must be unique")
+    missing_audit_columns = [
+        column for column in audit_columns if column not in frame.columns
+    ]
+    if missing_audit_columns:
+        raise ValueError(f"Dataset is missing requested audit columns: {missing_audit_columns}")
+    if target_column in audit_columns:
+        raise ValueError("The target column cannot also be an audit group")
+    if split_column is not None and split_column in audit_columns:
+        raise ValueError("The split column cannot be used as an audit group")
     features = clean_features(frame[feature_columns])
 
     train_indices, val_indices, test_indices = _split_indices(
@@ -505,13 +649,58 @@ def run_tabular_baseline(
         "feature_count_after_encoding": int(x_train.shape[1]),
         "numeric_features": numeric_columns,
         "categorical_features": categorical_columns,
-        "sensitive_columns": sensitive_columns,
-        "sensitive_features_in_model": include_sensitive_features,
+        "model_feature_columns": feature_columns,
+        "analysis_mode": "basic classification evaluation" if basic_only else "full evaluation",
         "best_epoch": best_epoch,
         "best_validation_accuracy": best_val_accuracy,
         "test_metrics": classification,
         "training_history": history,
     }
+    if not basic_only:
+        raw_test_features = features.iloc[test_indices].reset_index(drop=True)
+        permutation_importance = _calculate_permutation_importance(
+            model,
+            preprocessor,
+            raw_test_features,
+            y_true_indices,
+            test_result,
+            len(class_labels),
+            batch_size=batch_size,
+            num_workers=num_workers,
+            repeats=importance_repeats,
+            seed=seed,
+            device=device,
+        )
+        permutation_path = output_dir / "permutation_importance.json"
+        with permutation_path.open("w", encoding="utf-8") as output_file:
+            json.dump(
+                {
+                    "method": "global permutation importance on held-out test rows",
+                    "metric_direction": {
+                        "accuracy_decrease": "positive means the metric fell after shuffling",
+                        "balanced_accuracy_decrease": "positive means the metric fell after shuffling",
+                        "log_loss_increase": "positive means log loss rose after shuffling",
+                    },
+                    "interpretation_limitations": [
+                        "This is predictive association, not a causal effect.",
+                        "Correlated inputs can share or mask permutation importance.",
+                        "Negative values mean shuffling improved the measured metric in these repeats.",
+                    ],
+                    "importance": permutation_importance,
+                },
+                output_file,
+                indent=2,
+                ensure_ascii=False,
+            )
+        _save_permutation_importance(
+            permutation_importance,
+            output_dir / "permutation_importance.png",
+        )
+        metrics["interpretability"] = {
+            "method": "global permutation importance",
+            "report": permutation_path.name,
+            "plot": "permutation_importance.png",
+        }
     with (output_dir / "metrics.json").open("w", encoding="utf-8") as output_file:
         json.dump(metrics, output_file, indent=2, ensure_ascii=False)
     joblib.dump(preprocessor, preprocessor_path)
@@ -521,41 +710,44 @@ def run_tabular_baseline(
         output_dir / "confusion_matrix.png",
     )
 
-    calibration_bins = min(
-        max(1, math.ceil(math.log2(len(y_true_indices)) + 1)), len(y_true_indices)
-    )
-    ece_bins = min(10, calibration_bins)
-    ece, ece_details = calculate_ece(
-        y_true_indices, y_pred_indices, confidence, num_bins=ece_bins
-    )
-    ace, classwise_bins = calculate_ace(
-        y_true_indices,
-        probability_array,
-        num_bins=calibration_bins,
-    )
-    calibration = {
-        "top_label_ece": ece,
-        "classwise_ace": ace,
-        "top_label_ece_num_bins": ece_bins,
-        "classwise_ace_num_bins": calibration_bins,
-        "ece_bins": ece_details,
-        "classwise_bins": classwise_bins,
-    }
-    with (output_dir / "calibration.json").open("w", encoding="utf-8") as output_file:
-        json.dump(calibration, output_file, indent=2, ensure_ascii=False)
-    uncertainty = calculate_confidence_statistics(
-        y_true_indices, y_pred_indices, confidence
-    )
-    with (output_dir / "uncertainty.json").open("w", encoding="utf-8") as output_file:
-        json.dump(uncertainty, output_file, indent=2, ensure_ascii=False)
+    if not basic_only:
+        calibration_bins = min(
+            max(1, math.ceil(math.log2(len(y_true_indices)) + 1)), len(y_true_indices)
+        )
+        ece_bins = min(10, calibration_bins)
+        ece, ece_details = calculate_ece(
+            y_true_indices, y_pred_indices, confidence, num_bins=ece_bins
+        )
+        ace, classwise_bins = calculate_ace(
+            y_true_indices,
+            probability_array,
+            num_bins=calibration_bins,
+        )
+        calibration = {
+            "top_label_ece": ece,
+            "classwise_ace": ace,
+            "top_label_ece_num_bins": ece_bins,
+            "classwise_ace_num_bins": calibration_bins,
+            "ece_bins": ece_details,
+            "classwise_bins": classwise_bins,
+        }
+        with (output_dir / "calibration.json").open("w", encoding="utf-8") as output_file:
+            json.dump(calibration, output_file, indent=2, ensure_ascii=False)
+        uncertainty = calculate_confidence_statistics(
+            y_true_indices, y_pred_indices, confidence
+        )
+        with (output_dir / "uncertainty.json").open("w", encoding="utf-8") as output_file:
+            json.dump(uncertainty, output_file, indent=2, ensure_ascii=False)
 
     test_groups: dict[str, list[Any]] = {}
-    for column in sensitive_columns:
-        raw_values = group_frame.iloc[test_indices][column].tolist()
-        test_groups[column] = [
-            None if pd.isna(value) else value.item() if isinstance(value, np.generic) else value
-            for value in raw_values
-        ]
+    audit_grouping: dict[str, Any] = {}
+    if not basic_only and audit_columns:
+        test_groups, audit_grouping = build_feature_audit_groups(
+            frame.iloc[train_indices][audit_columns].reset_index(drop=True),
+            frame.iloc[test_indices][audit_columns].reset_index(drop=True),
+            columns=audit_columns,
+            include_intersections=True,
+        )
     predictions_path = output_dir / "predictions.csv"
     _write_predictions(
         predictions_path,
@@ -566,12 +758,12 @@ def run_tabular_baseline(
         test_groups,
     )
 
-    if sensitive_columns:
+    if not basic_only and audit_columns:
         fairness_path = output_dir / "fairness.json"
         fairness = run_fairness_audit(
             y_true=y_true,
             y_pred=y_pred,
-            sensitive_features=test_groups,
+            audit_features=test_groups,
             probabilities=probability_array,
             class_labels=class_labels,
             positive_label=positive_label,
@@ -580,14 +772,21 @@ def run_tabular_baseline(
                 "dataset": dataset_name,
                 "split": "test",
                 "target_column": target_column,
-                "sensitive_features_in_model": include_sensitive_features,
+                "audit_attributes_used_as_inputs": [
+                    column for column in audit_columns if column in feature_columns
+                ],
+                "audit_setup": audit_grouping,
                 "training_seed": seed,
             },
             output_path=fairness_path,
         )
+        ranking_path = write_disparity_ranking(
+            fairness,
+            output_dir / "fairness_ranking.csv",
+        )
         charts: dict[str, Any] = {}
         roc_charts: dict[str, Any] = {}
-        for index, attribute in enumerate(sensitive_columns):
+        for index, attribute in enumerate(audit_columns):
             if fairness["attributes"][attribute]["group_metrics"]:
                 charts[attribute] = save_group_metric_panels(
                     fairness,
@@ -604,6 +803,7 @@ def run_tabular_baseline(
             )
         fairness["artifacts"] = {
             "predictions_csv": predictions_path.name,
+            "disparity_ranking_csv": ranking_path.name,
             "group_metric_charts": {
                 name: {extension: path.name for extension, path in files.items()}
                 for name, files in charts.items()
@@ -619,14 +819,27 @@ def run_tabular_baseline(
         with fairness_path.open("w", encoding="utf-8") as output_file:
             json.dump(fairness, output_file, indent=2, ensure_ascii=False)
         print(f"Fairness report: {fairness_path}")
-    else:
-        print("No sensitive columns supplied; fairness report was not generated.")
+        print("Largest equalized-odds gaps:")
+        for item in fairness["disparity_ranking"]["ranked_attributes"][:10]:
+            if item["disparity_score"] is None:
+                print(f"  {item['attribute']}: score unavailable")
+            else:
+                print(
+                    f"  {item['attribute']}: {item['disparity_score']:.4f} "
+                    f"({item['disparity_score'] * 100:.1f} pp), "
+                    f"class={item['class_label']}, min_group_n={item['minimum_group_sample_count']}"
+                )
+    elif not basic_only:
+        print("No feature columns supplied for the fairness audit.")
 
-    print(
+    metrics_line = (
         f"Test accuracy={classification['accuracy']:.4f} "
         f"balanced_accuracy={classification['balanced_accuracy']:.4f} "
-        f"F1={classification['f1']:.4f} | ECE={ece:.4f} | ACE={ace:.4f}"
+        f"F1={classification['f1']:.4f}"
     )
+    if not basic_only:
+        metrics_line += f" | ECE={ece:.4f} | ACE={ace:.4f}"
+    print(metrics_line)
     print(f"Artifacts: {output_dir.resolve()}")
     return metrics
 
@@ -639,9 +852,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--csv", type=Path, help="One CSV containing a tabular dataset")
     parser.add_argument("--target-column", help="Target label column for --csv")
     parser.add_argument(
+        "--audit-columns",
         "--sensitive-columns",
         nargs="+",
-        help="Categorical group columns to audit; omitted from model features by default",
+        dest="audit_columns",
+        help=(
+            "Optional columns to audit instead of all model input features; "
+            "numeric columns are binned and pairwise intersections are included"
+        ),
     )
     parser.add_argument(
         "--drop-columns",
@@ -653,11 +871,6 @@ def _parse_args() -> argparse.Namespace:
         "--split-column",
         help="Optional CSV column containing train/validation/test row assignments",
     )
-    parser.add_argument(
-        "--include-sensitive-features",
-        action="store_true",
-        help="Allow sensitive group columns as model features",
-    )
     parser.add_argument("--positive-label", help="Positive outcome label for binary fairness metrics")
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--output-dir", type=Path, default=Path("results/adult_income"))
@@ -665,6 +878,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--importance-repeats",
+        type=int,
+        default=5,
+        help="Repeats for each feature in the global permutation importance analysis",
+    )
+    parser.add_argument(
+        "--basic-only",
+        action="store_true",
+        help="Train and report standard classification metrics only; skip fairness and interpretation",
+    )
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -675,10 +899,9 @@ if __name__ == "__main__":
         dataset=args.dataset,
         csv_path=args.csv,
         target_column=args.target_column,
-        sensitive_columns=args.sensitive_columns,
+        audit_columns=args.audit_columns,
         drop_columns=args.drop_columns,
         split_column=args.split_column,
-        include_sensitive_features=args.include_sensitive_features,
         positive_label=args.positive_label,
         data_dir=args.data_dir,
         output_dir=args.output_dir,
@@ -686,5 +909,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         num_workers=args.num_workers,
+        importance_repeats=args.importance_repeats,
+        basic_only=args.basic_only,
         seed=args.seed,
     )

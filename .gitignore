@@ -6,4 +6,5 @@ results/*.pt
 results/*.json
 results/*.png
 results/adult_income/
+results/adult_income_basic_*/
 data/

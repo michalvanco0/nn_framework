@@ -24,7 +24,8 @@ def _as_1d(values: Any, name: str) -> np.ndarray:
         raise ValueError(f"{name} must be a one-dimensional sequence") from exc
 
     result = np.empty(len(items), dtype=object)
-    result[:] = items
+    for index, item in enumerate(items):
+        result[index] = item
     return result
 
 
@@ -291,19 +292,19 @@ def _gap(values: list[tuple[Any, float | None]]) -> dict[str, Any]:
     }
 
 
-def _attribute_columns(sensitive_features: Any) -> dict[str, Any]:
-    if isinstance(sensitive_features, Mapping):
-        columns = {str(name): values for name, values in sensitive_features.items()}
-    elif hasattr(sensitive_features, "columns") and hasattr(sensitive_features, "__getitem__"):
+def _attribute_columns(audit_features: Any) -> dict[str, Any]:
+    if isinstance(audit_features, Mapping):
+        columns = {str(name): values for name, values in audit_features.items()}
+    elif hasattr(audit_features, "columns") and hasattr(audit_features, "__getitem__"):
         columns = {
-            str(name): sensitive_features[name]
-            for name in sensitive_features.columns
+            str(name): audit_features[name]
+            for name in audit_features.columns
         }
     else:
-        columns = {"sensitive_attribute": sensitive_features}
+        columns = {"audit_feature": audit_features}
 
     if not columns:
-        raise ValueError("sensitive_features must contain at least one attribute")
+        raise ValueError("audit_features must contain at least one attribute")
     return columns
 
 
@@ -352,6 +353,13 @@ def _group_ranges(
             )
             for rate_name in class_rate_names
         }
+        tpr_gap = ranges["true_positive_rate"]["max_minus_min"]
+        fpr_gap = ranges["false_positive_rate"]["max_minus_min"]
+        equalized_odds_gap = (
+            None
+            if tpr_gap is None or fpr_gap is None
+            else float(max(tpr_gap, fpr_gap))
+        )
         per_class_ranges.append(
             {
                 "class_label": _json_value(label),
@@ -363,6 +371,7 @@ def _group_ranges(
                         "true_positive_rate": ranges["true_positive_rate"],
                         "false_positive_rate": ranges["false_positive_rate"],
                     },
+                    "equalized_odds_gap": equalized_odds_gap,
                     "predictive_parity_gap": ranges["positive_predictive_value"],
                     "negative_predictive_parity_gap": ranges["negative_predictive_value"],
                 },
@@ -420,6 +429,132 @@ def _group_ranges(
     return result
 
 
+def _disparity_ranking(
+    attributes: Mapping[str, Any],
+    class_labels: list[Any],
+    *,
+    positive_label: Any | None,
+    small_group_warning_threshold: int | None,
+) -> dict[str, Any]:
+    """Rank audit attributes by their largest equalized-odds rate gap."""
+    scored_labels = [positive_label] if positive_label is not None else class_labels
+    entries: list[dict[str, Any]] = []
+
+    for attribute_name, attribute in attributes.items():
+        class_scores = []
+        for class_result in attribute["across_group_gaps"]["per_class"]:
+            class_label = next(
+                label
+                for label in class_labels
+                if _same_value(label, class_result["class_label"])
+            )
+            if not any(_same_value(class_label, label) for label in scored_labels):
+                continue
+            metrics = class_result["metrics"]
+            tpr_gap = metrics["true_positive_rate"]["max_minus_min"]
+            fpr_gap = metrics["false_positive_rate"]["max_minus_min"]
+            equalized_odds_gap = (
+                None
+                if tpr_gap is None or fpr_gap is None
+                else float(max(tpr_gap, fpr_gap))
+            )
+            class_scores.append(
+                {
+                    "class_label": _json_value(class_label),
+                    "equal_opportunity_gap": tpr_gap,
+                    "true_positive_rate_gap": tpr_gap,
+                    "false_positive_rate_gap": fpr_gap,
+                    "equalized_odds_gap": equalized_odds_gap,
+                    "most_disparate_groups": {
+                        "true_positive_rate": {
+                            "minimum_groups": metrics["true_positive_rate"]["minimum_groups"],
+                            "maximum_groups": metrics["true_positive_rate"]["maximum_groups"],
+                        },
+                        "false_positive_rate": {
+                            "minimum_groups": metrics["false_positive_rate"]["minimum_groups"],
+                            "maximum_groups": metrics["false_positive_rate"]["maximum_groups"],
+                        },
+                    },
+                }
+            )
+
+        defined_scores = [
+            item for item in class_scores if item["equalized_odds_gap"] is not None
+        ]
+        worst_class = (
+            max(defined_scores, key=lambda item: item["equalized_odds_gap"])
+            if defined_scores
+            else None
+        )
+        group_metrics = attribute["group_metrics"]
+        group_sizes = [group["sample_count"] for group in group_metrics]
+        entries.append(
+            {
+                "attribute": attribute_name,
+                "attribute_type": (
+                    "intersection" if attribute_name.startswith("intersection::") else "feature"
+                ),
+                "disparity_score": (
+                    None if worst_class is None else worst_class["equalized_odds_gap"]
+                ),
+                "score_metric": "equalized_odds_max_rate_gap",
+                "class_label": None if worst_class is None else worst_class["class_label"],
+                "equal_opportunity_gap": (
+                    None if worst_class is None else worst_class["equal_opportunity_gap"]
+                ),
+                "true_positive_rate_gap": (
+                    None if worst_class is None else worst_class["true_positive_rate_gap"]
+                ),
+                "false_positive_rate_gap": (
+                    None if worst_class is None else worst_class["false_positive_rate_gap"]
+                ),
+                "accuracy_gap": attribute["across_group_gaps"]["accuracy"]["max_minus_min"],
+                "most_disparate_groups": (
+                    None if worst_class is None else worst_class["most_disparate_groups"]
+                ),
+                "sample_count": attribute["sample_count"],
+                "group_count": attribute["group_count"],
+                "minimum_group_sample_count": min(group_sizes) if group_sizes else 0,
+                "small_group_count": sum(
+                    group_size < small_group_warning_threshold
+                    for group_size in group_sizes
+                )
+                if small_group_warning_threshold is not None
+                else 0,
+                "class_results": class_scores,
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (
+            item["disparity_score"] is None,
+            -(item["disparity_score"] or 0.0),
+            item["attribute"],
+        )
+    )
+    for rank, item in enumerate(
+        (entry for entry in entries if entry["disparity_score"] is not None),
+        start=1,
+    ):
+        item["rank"] = rank
+    for item in entries:
+        item.setdefault("rank", None)
+
+    return {
+        "method": "Maximum equalized-odds gap across the scored classes",
+        "score_metric": "equalized_odds_max_rate_gap",
+        "score_range": [0.0, 1.0],
+        "interpretation": (
+            "0 means the measured true-positive and false-positive rates match "
+            "across the compared groups; 1 is the largest possible rate gap. "
+            "A score of 0.20 is a 20 percentage-point gap. This is descriptive, "
+            "not a probability of bias or a causal explanation."
+        ),
+        "scored_classes": [_json_value(label) for label in scored_labels],
+        "ranked_attributes": entries,
+    }
+
+
 def _reference_comparisons(
     group_results: list[dict[str, Any]],
     reference_value: Any,
@@ -436,7 +571,7 @@ def _reference_comparisons(
     if reference is None:
         raise ValueError(
             f"Reference group {_json_value(reference_value)!r} was not found "
-            "among the non-missing values of this sensitive attribute"
+            "among the non-missing values of this audit feature"
         )
 
     comparisons = []
@@ -585,16 +720,25 @@ def _abroca_by_class(
 def calculate_fairness_metrics(
     y_true: Any,
     y_pred: Any,
-    sensitive_features: Any,
+    sensitive_features: Any | None = None,
     *,
+    audit_features: Any | None = None,
     probabilities: Any | None = None,
     class_labels: Any | None = None,
     positive_label: Any | None = None,
     reference_groups: Mapping[str, Any] | None = None,
     accepted_mask: Any | None = None,
     small_group_warning_threshold: int | None = 30,
+    roc_curve_group_limit: int | None = 100,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if audit_features is None:
+        audit_features = sensitive_features
+    elif sensitive_features is not None:
+        raise ValueError("Pass audit_features or sensitive_features, not both")
+    if audit_features is None:
+        raise ValueError("audit_features must contain at least one feature/group column")
+
     true_values = _as_1d(y_true, "y_true")
     predicted_values = _as_1d(y_pred, "y_pred")
     if len(true_values) == 0:
@@ -646,6 +790,8 @@ def calculate_fairness_metrics(
 
     if small_group_warning_threshold is not None and small_group_warning_threshold < 1:
         raise ValueError("small_group_warning_threshold must be positive or None")
+    if roc_curve_group_limit is not None and roc_curve_group_limit < 1:
+        raise ValueError("roc_curve_group_limit must be positive or None")
 
     probability_values = None
     if probabilities is not None:
@@ -682,18 +828,18 @@ def calculate_fairness_metrics(
         if not np.allclose(np.sum(probability_values, axis=1), 1.0, atol=1e-2):
             raise ValueError("Each probability row must sum to 1")
 
-    columns = _attribute_columns(sensitive_features)
+    columns = _attribute_columns(audit_features)
     references = {str(name): value for name, value in (reference_groups or {}).items()}
     unknown_references = set(references) - set(columns)
     if unknown_references:
-        raise ValueError(
-            "reference_groups names unknown sensitive attributes: "
+            raise ValueError(
+                "reference_groups names unknown audit features: "
             + ", ".join(sorted(unknown_references))
         )
 
     attributes: dict[str, Any] = {}
     for name, raw_values in columns.items():
-        group_values = _as_1d(raw_values, f"sensitive_features[{name!r}]")
+        group_values = _as_1d(raw_values, f"audit_features[{name!r}]")
         if len(group_values) != len(true_values):
             raise ValueError(
                 f"Sensitive attribute {name!r} must contain one value per sample"
@@ -710,7 +856,7 @@ def calculate_fairness_metrics(
                 group_indices.setdefault(value, []).append(index)
             except TypeError as exc:
                 raise ValueError(
-                    f"Values in sensitive attribute {name!r} must be hashable"
+                    f"Values in audit feature {name!r} must be hashable"
                 ) from exc
 
         group_results = []
@@ -795,24 +941,35 @@ def calculate_fairness_metrics(
             }
             for group in group_results
         ]
-        roc_curve_comparisons = (
-            None
-            if probability_values is None
-            else _abroca_by_class(
+        roc_curve_comparisons_omitted_reason = None
+        if probability_values is None:
+            roc_curve_comparisons = None
+        elif (
+            roc_curve_group_limit is not None
+            and len(group_results) > roc_curve_group_limit
+        ):
+            roc_curve_comparisons = []
+            roc_curve_comparisons_omitted_reason = (
+                f"ABROCA was omitted because this attribute has {len(group_results)} "
+                f"groups, above the configured limit of {roc_curve_group_limit}."
+            )
+        else:
+            roc_curve_comparisons = _abroca_by_class(
                 group_results,
                 true_values,
                 probability_values,
                 labels,
             )
-        )
         attributes[name] = {
             "sample_count": int(len(true_values)),
             "included_sample_count": int(len(true_values) - missing_count),
+            "missing_group_value_count": int(missing_count),
             "missing_sensitive_value_count": int(missing_count),
             "group_count": int(len(group_results)),
             "group_metrics": public_groups,
             "across_group_gaps": _group_ranges(group_results, labels),
             "roc_curve_comparisons": roc_curve_comparisons,
+            "roc_curve_comparisons_omitted_reason": roc_curve_comparisons_omitted_reason,
             "reference_group_comparisons": reference_comparison,
             "warnings": warnings,
         }
@@ -826,6 +983,13 @@ def calculate_fairness_metrics(
         None
         if probability_values is None
         else _probability_metrics(true_values, probability_values, labels)
+    )
+
+    disparity_ranking = _disparity_ranking(
+        attributes,
+        labels,
+        positive_label=positive_label,
+        small_group_warning_threshold=small_group_warning_threshold,
     )
 
     return {
@@ -843,26 +1007,35 @@ def calculate_fairness_metrics(
         "probability_metrics_included": probability_values is not None,
         "selective_metrics_included": accepted_mask is not None,
         "small_group_warning_threshold": small_group_warning_threshold,
+        "roc_curve_group_limit": roc_curve_group_limit,
+        "equal_opportunity_definition": (
+            "For each class, the maximum minus minimum true-positive rate across groups."
+        ),
+        "equalized_odds_definition": (
+            "For each class, the maximum of the true-positive-rate gap and false-positive-rate gap across groups."
+        ),
         "classification_metric_population": (
             "accepted samples only" if accepted_mask is not None else "all samples"
         ),
         "probability_metric_population": "all samples",
         "report_semantics": (
-            "Descriptive measurements only. No aggregate fairness score, threshold, "
-            "ranking, or fair/unfair verdict is applied."
+            "Descriptive measurements only. The disparity score ranks the largest "
+            "observed equalized-odds rate gaps; it is not a fair/unfair verdict."
         ),
         "attributes": attributes,
+        "disparity_ranking": disparity_ranking,
         "limitations": [
-            "Metric meaning depends on the selected task, class, sensitive attributes, and context.",
+            "Metric meaning depends on the selected task, class, audited features, and context.",
             "Group gaps describe observed differences and do not establish their cause or social meaning.",
             "Different fairness criteria can disagree; the report keeps their measurements separate.",
             "Probability-quality metrics require predicted probabilities. Calibration error is evaluated separately with ACE in the calibration module.",
             "No confidence intervals or statistical significance tests are calculated.",
             "Reference-based differences are emitted only for reference groups supplied by the caller.",
+            "The disparity ranking is descriptive and can be unstable for small groups; review sample counts and uncertainty before drawing conclusions.",
             "This module covers classification; causal, individual, ranking, and regression fairness require task-specific inputs and assumptions.",
         ],
         "not_measured": [
-            "Sensitive attributes not supplied by the caller.",
+            "Feature groups not supplied to the audit.",
             "Causal explanations for observed group differences.",
             "Individual or counterfactual fairness.",
             "Regression or ranking fairness.",

@@ -1,16 +1,13 @@
 from __future__ import annotations
-
 import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn, optim
 from tqdm import tqdm
-
 from datasets.cifar10 import get_cifar10_train_val_test_dataloaders
 from evaluation.evaluator import evaluate as evaluate_predictions
 from evaluation.performance import calculate_classification_metrics

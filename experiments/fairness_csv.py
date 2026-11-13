@@ -1,18 +1,20 @@
 from __future__ import annotations
-
 import argparse
 import csv
 import json
 from pathlib import Path
 from typing import Any
-
 import numpy as np
-
+import pandas as pd
 from evaluation.fairness_plots import (
     save_group_metric_panels,
     save_group_roc_curve_comparisons,
 )
-from experiments.fairness import run_fairness_audit
+from experiments.fairness import (
+    build_feature_audit_groups,
+    run_fairness_audit,
+    write_disparity_ranking,
+)
 
 
 def _read_rows(input_path: Path) -> tuple[list[dict[str, str]], list[str]]:
@@ -86,7 +88,7 @@ def run_fairness_csv_audit(
     *,
     label_column: str,
     prediction_column: str,
-    group_columns: list[str],
+    group_columns: list[str] | None = None,
     probability_columns: list[str] | None = None,
     class_labels: list[str] | None = None,
     positive_label: str | None = None,
@@ -97,22 +99,14 @@ def run_fairness_csv_audit(
     split_name: str | None = None,
     output_path: Path = Path("results/fairness.json"),
 ) -> dict[str, Any]:
-    if not group_columns:
-        raise ValueError("At least one group column must be supplied")
-    if len(set(group_columns)) != len(group_columns):
+    if group_columns is not None and not group_columns:
+        raise ValueError("At least one group column must be supplied when the option is used")
+    if group_columns is not None and len(set(group_columns)) != len(group_columns):
         raise ValueError("Group column names must be unique")
-    if label_column in group_columns:
-        raise ValueError(
-            "The target-label column cannot also be used as a group attribute"
-        )
 
     rows, fieldnames = _read_rows(input_path)
     y_true = _get_column(rows, fieldnames, label_column)
     y_pred = _get_column(rows, fieldnames, prediction_column)
-    groups = {
-        column: _get_column(rows, fieldnames, column, allow_missing=True)
-        for column in group_columns
-    }
 
     probabilities = None
     if probability_columns:
@@ -148,6 +142,60 @@ def run_fairness_csv_audit(
         accepted_values = _get_column(rows, fieldnames, accepted_column)
         accepted_mask = _parse_accepted_values(accepted_values, accepted_column)
 
+    output_columns = {
+        label_column,
+        prediction_column,
+        *(probability_columns or []),
+    }
+    if accepted_column is not None:
+        output_columns.add(accepted_column)
+    if group_columns is None:
+        group_columns = [column for column in fieldnames if column not in output_columns]
+    if not group_columns:
+        raise ValueError(
+            "No feature columns remain to audit; pass --group-columns explicitly"
+        )
+    if output_columns.intersection(group_columns):
+        raise ValueError("Label, prediction, probability, and accepted columns cannot be audit groups")
+    if label_column in group_columns:
+        raise ValueError("The target-label column cannot also be an audit group")
+
+    raw_group_frame = pd.DataFrame(
+        {
+            column: _get_column(rows, fieldnames, column, allow_missing=True)
+            for column in group_columns
+        }
+    )
+    for column in group_columns:
+        numeric_values = pd.to_numeric(raw_group_frame[column], errors="coerce")
+        original_nonmissing = raw_group_frame[column].notna()
+        if original_nonmissing.any() and numeric_values[original_nonmissing].notna().all():
+            raw_group_frame[column] = numeric_values
+
+    already_intersectional = any(
+        column.startswith("intersection::") for column in group_columns
+    )
+    if already_intersectional:
+        groups = {
+            column: raw_group_frame[column].tolist()
+            for column in group_columns
+        }
+        audit_setup = {
+            "method": "Use the supplied feature groups and intersections as provided",
+            "intersections_already_present": True,
+        }
+        chart_columns = [
+            column for column in group_columns if not column.startswith("intersection::")
+        ]
+    else:
+        groups, audit_setup = build_feature_audit_groups(
+            raw_group_frame,
+            raw_group_frame,
+            columns=group_columns,
+            include_intersections=True,
+        )
+        chart_columns = list(group_columns)
+
     metadata = {
         key: value
         for key, value in {
@@ -156,13 +204,14 @@ def run_fairness_csv_audit(
             "split": split_name,
             "predictions_file": str(input_path),
             "row_alignment": "all columns refer to the same example on each CSV row",
+            "audit_setup": audit_setup,
         }.items()
         if value is not None
     }
     report = run_fairness_audit(
         y_true=y_true,
         y_pred=y_pred,
-        sensitive_features=groups,
+        audit_features=groups,
         probabilities=probabilities,
         class_labels=class_labels,
         positive_label=positive_label,
@@ -173,7 +222,7 @@ def run_fairness_csv_audit(
 
     chart_paths = {}
     roc_chart_paths = {}
-    for index, attribute_name in enumerate(group_columns):
+    for index, attribute_name in enumerate(chart_columns):
         if report["attributes"][attribute_name]["group_metrics"]:
             chart_paths[attribute_name] = save_group_metric_panels(
                 report,
@@ -196,6 +245,10 @@ def run_fairness_csv_audit(
                 ),
             )
     report["artifacts"] = {
+        "disparity_ranking_csv": write_disparity_ranking(
+            report,
+            output_path.with_name(f"{output_path.stem}_ranking.csv"),
+        ).name,
         "group_metric_charts": {
             attribute_name: {
                 extension: path.name for extension, path in paths.items()
@@ -218,7 +271,7 @@ def run_fairness_csv_audit(
         json.dump(report, output_file, indent=2, ensure_ascii=False)
 
     print(f"Overall accuracy: {report['overall_metrics']['accuracy']:.4f}")
-    for attribute_name in group_columns:
+    for attribute_name in chart_columns:
         attribute = report["attributes"][attribute_name]
         print(f"\nResults by group for {attribute_name!r}:")
         for group in attribute["group_metrics"]:
@@ -236,6 +289,14 @@ def run_fairness_csv_audit(
             print("  chart: skipped because the attribute has no observed groups")
         for class_label, paths in roc_chart_paths.get(attribute_name, {}).items():
             print(f"  ROC comparison for {class_label}: {paths['png']}")
+    print("\nLargest equalized-odds gaps:")
+    for item in report["disparity_ranking"]["ranked_attributes"][:10]:
+        print(
+            f"  {item['attribute']}: score={item['disparity_score']:.4f}, "
+            f"class={item['class_label']}, groups={item['group_count']}"
+            if item["disparity_score"] is not None
+            else f"  {item['attribute']}: score unavailable"
+        )
     print(f"Detailed report: {output_path}")
     return report
 
@@ -250,7 +311,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--label-column", required=True)
     parser.add_argument("--prediction-column", required=True)
-    parser.add_argument("--group-columns", nargs="+", required=True)
+    parser.add_argument(
+        "--group-columns",
+        nargs="+",
+        help=(
+            "Columns to audit; by default all columns other than labels, predictions, "
+            "probabilities, and acceptance flags are used"
+        ),
+    )
     parser.add_argument("--probability-columns", nargs="+")
     parser.add_argument(
         "--class-labels",
