@@ -1,8 +1,19 @@
+from math import ceil, log2
 from pathlib import Path
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+ECE_NUM_BINS = 10
+
+
+def calibration_bin_count(num_samples: int) -> int:
+    """Return the adaptive per-class bin count used for ACE (Sturges' rule)."""
+    if num_samples < 1:
+        raise ValueError("Calibration requires at least one sample")
+    return min(num_samples, max(1, ceil(log2(num_samples) + 1)))
 
 
 def calculate_ece(
@@ -127,6 +138,42 @@ def calculate_ace(
         )
 
     return float(np.mean(class_errors)), classwise_bins
+
+
+def calculate_calibration_metrics(
+    y_true,
+    y_pred,
+    confidence,
+    probabilities,
+    *,
+    ece_num_bins: int = ECE_NUM_BINS,
+    ace_num_bins: int | None = None,
+) -> dict:
+    y_true_array = np.asarray(y_true)
+    if ace_num_bins is None:
+        ace_num_bins = calibration_bin_count(len(y_true_array))
+    ece, ece_bins = calculate_ece(
+        y_true=y_true,
+        y_pred=y_pred,
+        confidence=confidence,
+        num_bins=ece_num_bins,
+    )
+    ace, classwise_bins = calculate_ace(
+        y_true=y_true,
+        probabilities=probabilities,
+        num_bins=ace_num_bins,
+    )
+    return {
+        "top_label_ece": ece,
+        "classwise_ace": ace,
+        "top_label_ece_num_bins": ece_num_bins,
+        "classwise_ace_num_bins": ace_num_bins,
+        "top_label_ece_binning": "fixed-width confidence bins",
+        "classwise_ace_binning": "adaptive equal-count bins per class",
+        "classwise_ace_bin_count_rule": "Sturges' rule: ceil(log2(number of samples) + 1)",
+        "ece_bins": ece_bins,
+        "classwise_bins": classwise_bins,
+    }
 
 
 def save_classwise_reliability_diagram(
@@ -449,44 +496,50 @@ def save_classwise_ace_reliability_diagram(
     )
 
 
-def save_classwise_ace_bar_chart(
-    classwise_bins,
-    output_path: Path,
-    class_names=None,
-    max_classes: int = 20,
-):
+def save_calibration_plots(
+    calibration: dict,
+    class_names: list[str] | tuple[str, ...],
+    output_dir: Path,
+    *,
+    comparison_class_index: int | None = None,
+) -> dict[str, str]:
+    classwise_bins = calibration["classwise_bins"]
     if not classwise_bins:
-        return
-    if class_names is not None and len(class_names) != len(classwise_bins):
-        raise ValueError("class_names must match the number of classes")
-    if max_classes < 1:
-        raise ValueError("max_classes must be at least 1")
+        raise ValueError("Calibration plots require per-class ACE bins")
+    if len(class_names) != len(classwise_bins):
+        raise ValueError("class_names must match the number of probability classes")
 
-    ranked_classes = sorted(
-        classwise_bins,
-        key=lambda item: item["ace"],
-        reverse=True,
-    )[:max_classes]
-    class_indices = [item["class_index"] for item in ranked_classes]
-    labels = (
-        [class_names[class_index] for class_index in class_indices]
-        if class_names is not None
-        else [str(class_index) for class_index in class_indices]
+    if comparison_class_index is None:
+        comparison_class_index = max(classwise_bins, key=lambda item: item["ace"])[
+            "class_index"
+        ]
+    if not 0 <= comparison_class_index < len(class_names):
+        raise ValueError("comparison_class_index is outside class_names")
+
+    output_dir = Path(output_dir)
+    classwise_path = output_dir / "classwise_reliability_diagram.pdf"
+    ece_path = output_dir / "ece_reliability_diagram.pdf"
+    ace_path = output_dir / "comparison_class_ace_reliability_diagram.pdf"
+    class_result = classwise_bins[comparison_class_index]
+
+    save_classwise_reliability_diagram(
+        classwise_bins=classwise_bins,
+        output_path=classwise_path,
+        class_names=class_names,
     )
-    ace_values = [item["ace"] for item in ranked_classes]
-
-    fig, ax = plt.subplots(figsize=(10, max(6, len(labels) * 0.35)))
-    bars = ax.barh(labels[::-1], ace_values[::-1])
-    ax.bar_label(bars, fmt="%.3f", padding=3)
-    ax.set_xlabel("Adaptive calibration error (ACE)")
-    ax.set_ylabel("Class")
-    ax.set_title(
-        f"Worst-calibrated Classes (top {len(ranked_classes)})"
+    save_ece_reliability_diagram(
+        bins=calibration["ece_bins"],
+        ece=calibration["top_label_ece"],
+        output_path=ece_path,
     )
-    ax.set_xlim(0, max(0.1, max(ace_values) * 1.15))
-    ax.grid(axis="x", alpha=0.3)
-
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
-    plt.close(fig)
+    save_classwise_ace_reliability_diagram(
+        class_result=class_result,
+        class_name=class_names[comparison_class_index],
+        output_path=ace_path,
+    )
+    return {
+        "classwise_reliability_diagram": classwise_path.name,
+        "ece_reliability_diagram": ece_path.name,
+        "comparison_class_ace_reliability_diagram": ace_path.name,
+        "comparison_class": class_names[comparison_class_index],
+    }

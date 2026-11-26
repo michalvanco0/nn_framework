@@ -2,9 +2,6 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
-results/*.pt
-results/*.json
-results/*.png
-results/adult_income/
-results/adult_income_basic_*/
+results/**
+!results/.gitkeep
 data/
